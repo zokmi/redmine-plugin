@@ -25,7 +25,10 @@ def check(tag: str, root: Path) -> None:
     package = tomllib.loads((root / "redmine-mcp/pyproject.toml").read_text(encoding="utf-8"))
     if package["project"]["version"] != version:
         raise ValueError("redmine-mcp/pyproject.toml: version differs from tag")
-    for name in ("redmine-issue-writing", "issue-code-consistency-check", "release-change-items"):
+    for name in (
+        "redmine-issue-writing", "issue-code-consistency-check",
+        "release-change-items", "redmine-setup",
+    ):
         if not (root / "skills" / name / "SKILL.md").is_file():
             raise ValueError(f"Missing skill: {name}")
     print(f"Release {tag}: plugin versions and resources verified")

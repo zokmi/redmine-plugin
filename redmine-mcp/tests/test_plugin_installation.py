@@ -29,6 +29,11 @@ def test_plugin_manifests_and_marketplaces():
         marketplace = json.loads((ROOT / p).read_text(encoding="utf-8"))
         assert marketplace["name"] == "redmine-plugins"
         assert marketplace["plugins"][0]["name"] == "redmine"
+        source = marketplace["plugins"][0]["source"]
+        if p.startswith(".claude-plugin"):
+            assert source == {"source": "github", "repo": "zokmi/redmine-plugin", "ref": "main"}
+        else:
+            assert source == {"source": "url", "url": "https://github.com/zokmi/redmine-plugin.git", "ref": "main"}
     for manifest in manifests[1:]:
         config = json.loads((ROOT / manifest["mcpServers"]).read_text(encoding="utf-8"))
         server = config["mcpServers"]["redmine"]
@@ -36,6 +41,16 @@ def test_plugin_manifests_and_marketplaces():
         assert "--from" in server["args"]
         assert server["args"][-1] == "redmine-mcp"
         assert not any("github.com" in arg for arg in server["args"])
+
+
+def test_setup_skill_uses_installed_root_and_private_terminal_input():
+    skill = (ROOT / "skills/redmine-setup/SKILL.md").read_text(encoding="utf-8")
+    assert "../../redmine-mcp" in skill
+    assert "絕對路徑" in skill
+    assert "API 金鑰" in skill
+    assert "終端機" in skill
+    assert "get_current_user" in skill
+    assert "Desktop" not in skill
 
 
 def test_skill_descriptions_route_distinct_workflows():

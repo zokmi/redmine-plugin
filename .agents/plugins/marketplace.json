@@ -1,11 +1,20 @@
 {
   "name": "redmine-plugins",
-  "interface": { "displayName": "Redmine Plugins" },
+  "interface": {
+    "displayName": "Redmine Plugins"
+  },
   "plugins": [
     {
       "name": "redmine",
-      "source": { "source": "local", "path": "./" },
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "source": {
+        "source": "url",
+        "url": "https://github.com/zokmi/redmine-plugin.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
       "category": "Productivity"
     }
   ]
