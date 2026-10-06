@@ -91,3 +91,7 @@ ZIP 安裝腳本、獨立 CLI 安裝命令與手動複製 skills 的方式已移
 `redmine-mcp/` 的 Python 套件保留作為 plugin 的執行元件與開發測試用途，不提供獨立安裝流程。`redmine-issue-skills/` 保留格式參考與既有測試資料，plugin 技能來源為 `skills/`。
 
 Plugin 格式參考：[OpenAI plugin 文件](https://developers.openai.com/plugins/build/plugins)、[Claude Code plugin 文件](https://code.claude.com/docs/en/plugins-reference)。
+
+## 授權
+
+本套件採用 [MIT License](LICENSE)。

@@ -3,6 +3,7 @@
   "version": "0.14.1",
   "description": "Redmine MCP 與三個工作流程：查詢與維護單子、撰寫 bug／change／feature、查核程式異動、整理版更檢核項目。",
   "author": { "name": "Kenny Zheng" },
+  "license": "MIT",
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
