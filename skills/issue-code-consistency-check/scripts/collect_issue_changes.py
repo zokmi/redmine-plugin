@@ -289,6 +289,35 @@ def build_output(repo, args, commits, mode, spec, merge_count):
     return result
 
 
+def add_bounded_diffs(repo, output, max_lines, total_lines, total_chars=48000):
+    """按實際輸出位置計算預算；多單號共用 commit 的 patch 不重複輸出。"""
+    remaining = total_lines
+    remaining_chars = total_chars
+    seen = set()
+    groups = [*output["issues"].values(), {"commits": output["unlabeled"]}]
+    for group in groups:
+        for commit in group["commits"]:
+            for f in commit["files"]:
+                key = (commit["full_hash"], f["path"])
+                if key in seen:
+                    f["diff"] = {"omitted": "duplicate", "source_commit": commit["hash"]}
+                elif remaining <= 0 or remaining_chars <= 0:
+                    f["diff"] = {"omitted": "total_budget", "truncated": True}
+                else:
+                    f["diff"] = get_diff(repo, commit, f["path"], min(max_lines, remaining))
+                    patch = f["diff"]["patch"]
+                    if len(patch) > remaining_chars:
+                        f["diff"]["patch"] = patch[:remaining_chars]
+                        f["diff"]["truncated"] = True
+                    remaining_chars -= len(f["diff"]["patch"])
+                    remaining -= len(f["diff"]["patch"].splitlines())
+                seen.add(key)
+    output["diff_budget"] = {
+        "max_total_lines": total_lines, "emitted_lines": total_lines - remaining,
+        "max_total_chars": total_chars, "emitted_chars": total_chars - remaining_chars,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="依 Redmine 單號彙整 git 異動事實，供一致性查核使用")
     parser.add_argument("--repo", default=".", help="git repo 路徑（預設當前目錄）")
@@ -298,19 +327,26 @@ def main():
     parser.add_argument("--max-commits", type=int, help="commit 數量上限，用於範圍過大時先探勘")
     parser.add_argument("--with-diff", action="store_true", help="附上各檔案的 patch 內容")
     parser.add_argument("--max-diff-lines", type=int, default=400, help="每個檔案 patch 的行數上限（預設 400）")
+    parser.add_argument("--max-total-diff-lines", type=int, default=1200, help="整批 patch 行數上限（預設 1200）")
+    parser.add_argument("--max-total-diff-chars", type=int, default=48000,
+                        help="整批 patch 字元上限（預設 48000）")
+    parser.add_argument("--pretty", action="store_true", help="縮排 JSON，預設輸出緊湊 JSON")
     args = parser.parse_args()
+    if min(args.max_diff_lines, args.max_total_diff_lines, args.max_total_diff_chars) < 1:
+        parser.error("diff 行數上限必須大於 0")
 
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", newline="")
 
     commits, mode, spec, merge_count = resolve_commits(args.repo, args)
 
-    if args.with_diff:
-        for commit in commits:
-            for f in commit["files"]:
-                f["diff"] = get_diff(args.repo, commit, f["path"], args.max_diff_lines)
-
     output = build_output(args.repo, args, commits, mode, spec, merge_count)
-    print(json.dumps(output, ensure_ascii=False, indent=2))
+    if args.with_diff:
+        # 分組可能共用同一物件；複製後才能對每個輸出位置獨立標註。
+        output = json.loads(json.dumps(output))
+        add_bounded_diffs(args.repo, output, args.max_diff_lines,
+                          args.max_total_diff_lines, args.max_total_diff_chars)
+    print(json.dumps(output, ensure_ascii=False, indent=2 if args.pretty else None,
+                     separators=None if args.pretty else (",", ":")))
 
 
 if __name__ == "__main__":

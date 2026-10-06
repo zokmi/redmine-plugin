@@ -94,18 +94,8 @@ async def test_指示詞要求把圖片上傳為附件(make_registry):
     assert "content_base64" in instructions
 
 
-# --- manifest 成本：instructions 與 tool descriptions 每次對話都會完整送出 ---
-
-#: manifest（instructions + 所有 tool description）的字元上限。
-#:
-#: 這筆成本每一次對話都要付一遍，且目前協定版下 ttlMs／cacheScope 快取宣告不生效
-#: （見 create_server 的說明），無法攤銷。使用者常同時掛多個 MCP server，每個都在
-#: 競爭同一份預算。
-#:
-#: 這是一道棘輪而不是目標值：訂在目前實際值（4,187）之上約 5%，要加新規範時先確認
-#: 有沒有可以合併的重複，餘裕用完再談調高。餘裕刻意不留太少——只差十來個字的上限，
-#: 下一個人只會直接把數字改大，棘輪就失去意義。
-MANIFEST_CHAR_BUDGET = 4400
+# 指示詞與工具說明的字元上限；實際載入與快取成本依 client 而定。
+MANIFEST_CHAR_BUDGET = 3000
 
 
 async def test_manifest_不超過字元預算(registry):
@@ -119,25 +109,16 @@ async def test_manifest_不超過字元預算(registry):
     assert total <= MANIFEST_CHAR_BUDGET, f"manifest 已膨脹到 {total} 字元"
 
 
-async def test_撰寫規範不在工具說明重述(registry):
-    """server instructions 與工具說明都是每次對話必送，同一條規範重複一遍不會讓
-    模型讀得更準，只是把成本付兩次。
-
-    六組落點列舉原本是刻意的重複（一份在指示詞、一份在 get_issue_guide 的說明）；
-    工具刪除後只剩指示詞一份，另一份移到 SKILL.md。"""
+async def test_寫單規範按需從_plugin_skill_載入(registry):
     sites = registry(lambda r: httpx.Response(200))
-    mcp = create_server(sites)
-    tools = {tool.name: tool.description or "" for tool in await mcp.list_tools()}
     instructions = build_instructions(sites)
     await sites.aclose()
-
-    create = tools["create_issue"]
-    for rule in ("不可拆散到自訂欄位", "一次問一題", "不可自行臆測", "不覆寫 description"):
-        assert rule in instructions, f"指示詞應保留「{rule}」"
-        assert rule not in create, f"create_issue 不應重述「{rule}」"
-    for rule in ("功能壞了用 kind=bug", "沒讀過原始碼用 stage=report"):
-        assert rule in instructions, f"指示詞應保留「{rule}」"
-        assert rule not in create, f"create_issue 不應重述「{rule}」"
+    assert "redmine-issue-writing" in instructions
+    assert "summary=true" in instructions
+    skill = Path(__file__).resolve().parents[2] / "skills/redmine-issue-writing/SKILL.md"
+    content = skill.read_text(encoding="utf-8")
+    for rule in ("不可拆散到自訂欄位", "不臆測", "report", "diagnose", "UI／API／DB", "parent_issue_id"):
+        assert rule in content
 
 
 def test_原始碼不再有_get_issue_guide_字樣():
@@ -154,8 +135,7 @@ def test_原始碼不再有_get_issue_guide_字樣():
 
 
 async def test_指示詞與寫入工具改指向載體中立的格式來源(registry):
-    """刪掉工具不等於刪掉資訊：模型仍須知道去哪裡拿格式。措辭不可只寫 skill
-    名稱——用 MCP 的 harness 不一定有 skill 機制，所以要同時給檔案路徑。"""
+    """plugin 提供格式來源，不再依賴手動安裝路徑。"""
     sites = registry(lambda r: httpx.Response(200))
     mcp = create_server(sites)
     tools = {
@@ -167,37 +147,6 @@ async def test_指示詞與寫入工具改指向載體中立的格式來源(regi
     await sites.aclose()
 
     assert "redmine-issue-writing" in instructions, "指示詞未指向 skill 名稱"
-    assert "redmine-issue-guides" in instructions, "指示詞未給沒有 skill 機制時的路徑"
+    assert "redmine-issue-guides" not in instructions, "plugin 安裝不應指向舊手動安裝路徑"
     for name in ("create_issue", "update_issue", "add_issue_note"):
         assert "get_issue_guide" not in tools[name], f"{name} 仍指向已刪除的工具"
-
-
-async def test_指示詞要求新功能開發拆成三張子單(make_registry):
-    """新功能開發只開一張單時，UI、API、DB 三層的進度混在同一份驗收裡，誰做完了
-    分不出來。規則本體寫在骨架，指示詞只要讓模型在建單當下知道「要建四張、子單
-    用 parent_issue_id 掛母單」——這件事漏了不會有任何東西報錯。"""
-    sites = make_registry({"main": lambda r: httpx.Response(200)})
-    mcp = create_server(sites)
-    await sites.aclose()
-
-    instructions = mcp.instructions or ""
-    assert "UI／API／DB" in instructions, "指示詞未交代新功能開發要拆三張子單"
-    assert "parent_issue_id" in instructions, "指示詞未交代子單要以 parent_issue_id 掛母單"
-
-
-async def test_指示詞交代新需求的概述是活文件(make_registry):
-    """新需求會被反覆修正。少了這條，模型會把每次修正寫成一則新註記，
-    概述停在第一版，讀單的人得自己把散在十幾則註記裡的修正拼回去。
-    資料表與關聯已改由 DB 子單的概述承載，落點列舉裡 feature+assess 那格若還寫 notes，
-    模型就會在母單開一則註記再放一份，兩處遲早不同步。"""
-    sites = make_registry({"main": lambda r: httpx.Response(200)})
-    mcp = create_server(sites)
-    await sites.aclose()
-
-    instructions = mcp.instructions or ""
-    assert "概述是活文件" in instructions, "指示詞未交代 feature 的概述要回頭改寫"
-    assert "回頭改寫母單的 description" in instructions, "指示詞未指定改寫概述的工具"
-    assert "kind=feature 沒有 notes 落點" in instructions, "指示詞未交代 feature 沒有註記落點"
-    assert "feature+assess → DB 子單的 description" in instructions, (
-        "落點列舉仍把 feature 的資料表與關聯指向註記"
-    )

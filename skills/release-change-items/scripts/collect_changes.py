@@ -182,6 +182,7 @@ def main():
         default=None,
         help="只保留這些單號，以逗號分隔（例：4590,4432）。",
     )
+    parser.add_argument("--pretty", action="store_true", help="縮排 JSON，預設緊湊輸出")
     args = parser.parse_args()
 
     wanted = None
@@ -215,7 +216,8 @@ def main():
         "issue_count": len(groups),
         "issues": [groups[k] for k in sorted(groups, key=sort_key)],
     }
-    print(json.dumps(output, ensure_ascii=False, indent=1))
+    print(json.dumps(output, ensure_ascii=False, indent=1 if args.pretty else None,
+                     separators=None if args.pretty else (",", ":")))
 
 
 if __name__ == "__main__":

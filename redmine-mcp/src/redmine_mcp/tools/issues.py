@@ -546,6 +546,15 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
                 le=200,
             ),
         ] = JOURNAL_LIMIT,
+        summary: Annotated[
+            bool, Field(description=(
+                "摘要模式：省略次要欄位，內文與留言各最多 600 字；"
+                "編輯或判定前用 false 讀全文。"
+            ))
+        ] = False,
+        journals_offset: Annotated[
+            int, Field(description="從最新紀錄跳過幾筆；以 journals_next_offset 讀較早一批。", ge=0)
+        ] = 0,
     ) -> dict[str, Any]:
         """取得單張 issue。
 
@@ -555,12 +564,17 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
             include: 額外帶出的關聯資料，可用 journals、attachments、relations、children、watchers。
             journals_limit: 最多帶出幾筆註解／異動紀錄，取最近的；
                 超過時回應會標示 journals_truncated。
+            summary: 精簡欄位與長內文預覽，預設 false 保留完整內容。
+            journals_offset: 從最新紀錄跳過的筆數，依 journals_next_offset 往前讀。
         """
         params = {"include": _build_include(include)}
 
         async def fetch(client: RedmineClient) -> dict[str, Any]:
             raw = await client.get(f"/issues/{int(issue_id)}.json", params)
-            return format_issue_detail(raw.get("issue") or {}, journals_limit=int(journals_limit))
+            return format_issue_detail(
+                raw.get("issue") or {}, journals_limit=int(journals_limit),
+                summary=summary, journals_offset=journals_offset,
+            )
 
         result = await fan_out(sites.resolve(site), fetch, none_on_not_found=True)
         return {

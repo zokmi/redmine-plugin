@@ -171,13 +171,18 @@ def format_attachment(raw: dict) -> dict:
     }
 
 
-def format_issue_detail(raw: dict, journals_limit: int = JOURNAL_LIMIT) -> dict:
+def format_issue_detail(
+    raw: dict, journals_limit: int = JOURNAL_LIMIT, *,
+    summary: bool = False, journals_offset: int = 0,
+) -> dict:
     """單張 issue 的完整內容，自由文字皆標記為不可信。
 
     參數:
         raw: Redmine 回應中的 issue 物件。
         journals_limit: 最多輸出幾筆 journal（取最近的）；超過時另外輸出
             journals_total 與 journals_truncated，讓模型知道被截斷、可再細查。
+        summary: 省略次要欄位，內文與留言保留最多 600 字預覽。
+        journals_offset: 從最新紀錄跳過的筆數，用於往前讀取較早的批次。
     """
     detail: dict[str, Any] = {
         "id": raw.get("id"),
@@ -197,11 +202,16 @@ def format_issue_detail(raw: dict, journals_limit: int = JOURNAL_LIMIT) -> dict:
         "description": wrap_untrusted(raw.get("description")),
         "custom_fields": format_custom_fields(raw.get("custom_fields")),
     }
+    kept = []
     if raw.get("journals"):
         journals = raw["journals"]
         # Redmine 依時間由舊到新回傳，因此取尾端才是「最近 N 筆」。
-        kept = journals[-journals_limit:] if journals_limit >= 0 else journals
+        end = max(0, len(journals) - journals_offset)
+        start = max(0, end - journals_limit) if journals_limit >= 0 else 0
+        kept = journals[start:end]
         detail["journals"] = [format_journal(item) for item in kept]
+        if start > 0:
+            detail["journals_next_offset"] = journals_offset + len(kept)
         if len(kept) < len(journals):
             detail["journals_total"] = len(journals)
             detail["journals_truncated"] = True
@@ -219,7 +229,25 @@ def format_issue_detail(raw: dict, journals_limit: int = JOURNAL_LIMIT) -> dict:
         # watchers 在 ALLOWED_INCLUDES 裡，請求會真的送出 include=watchers；
         # 這裡不輸出的話模型會誤以為這張單沒有關注者。
         detail["watchers"] = [flatten_ref(item) for item in raw["watchers"]]
+    if summary:
+        # 摘要是獨立的讀取模式；回寫前須重新取得完整內容。
+        keys = {"id", "subject", "project", "status", "tracker", "updated_on",
+                "description", "journals", "journals_total", "journals_truncated",
+                "journals_next_offset", "attachments", "relations", "children", "watchers"}
+        detail = {key: value for key, value in detail.items() if key in keys}
+        detail["summary"] = True
+        detail["description"] = _preview_text(raw.get("description"))
+        for journal, original in zip(detail.get("journals", []), kept, strict=True):
+            if original.get("notes"):
+                journal["notes"] = _preview_text(original["notes"])
     return detail
+
+
+def _preview_text(value: Any) -> Any:
+    """摘要保留 600 字原文，轉義在截斷之後執行以維持圍籬完整。"""
+    if isinstance(value, str) and len(value) > 600:
+        return {"length": len(value), "preview": wrap_untrusted(value[:600]), "truncated": True}
+    return wrap_untrusted(value)
 
 
 #: relations 允許輸出的欄位；其餘欄位一律捨棄，不把 Redmine 回應原樣透傳給模型。
