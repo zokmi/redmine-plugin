@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify tag and main ancestry
+        run: |
+          set -euo pipefail
+          git rev-parse --verify "refs/tags/$RELEASE_TAG"
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor HEAD FETCH_HEAD
+          python scripts/check_plugin_release.py "$RELEASE_TAG"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Verify plugin workflows
+        working-directory: redmine-mcp
+        run: |
+          uv sync --locked --all-groups
+          uv run ruff check src tests/test_plugin_installation.py tests/test_cli.py tests/test_docs_install_section.py
+          uv run pytest tests/test_plugin_installation.py tests/test_cli.py tests/test_docs_install_section.py -q
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release already exists: $RELEASE_TAG"
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG"
+          fi
