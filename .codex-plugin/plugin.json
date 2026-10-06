@@ -1,0 +1,17 @@
+{
+  "name": "redmine",
+  "version": "0.14.1",
+  "description": "Redmine MCP 與三個工作流程：查詢與維護單子、撰寫 bug／change／feature、查核程式異動、整理版更檢核項目。",
+  "author": { "name": "Kenny Zheng" },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Redmine",
+    "shortDescription": "查詢 Redmine、寫單、查核異動、整理版更",
+    "longDescription": "依任務路由到 Redmine MCP、單子撰寫、需求與程式一致性查核或版更項目彙整。",
+    "developerName": "Kenny Zheng",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": "先判斷任務類型再選工作流：查詢或建立／修改 Redmine 單子使用 Redmine MCP；撰寫 bug、change、feature 使用 redmine-issue-writing；比對單號需求與 git 異動使用 issue-code-consistency-check；整理版本範圍與過版檢核使用 release-change-items。涉及 Redmine 寫入時先呈現將送出的內容並取得確認；查核與版更彙整以實際 git／Redmine 證據為準，資料不足標示待確認，不要猜測。"
+  }
+}

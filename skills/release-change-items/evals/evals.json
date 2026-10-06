@@ -1,0 +1,33 @@
+{
+  "skill_name": "release-change-items",
+  "evals": [
+    {
+      "id": 0,
+      "name": "指定單號整理版更項目",
+      "prompt": "幫我把 #4432 跟 #4003 這兩張單整理進這次過版的版更項目，repo 在 c:/Users/kenny/Documents/github/jeantech-salecrm_neo",
+      "expected_output": "七欄 TSV（Redmine編號/簡述/異動SQL/異動設定檔/異動程式/影響之重大功能/備註），SQL 欄為「無」，設定檔欄列出 environment.prod.ts 與 appsettings.PROD.json 並標註需人工確認，程式欄不含 .md 文件",
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "版本範圍推導含無單號異動",
+      "prompt": "這次要上線的是 HEAD~8..HEAD 這段，幫我盤點一下有哪些單、各改了什麼，我要填過版檢核文件。專案路徑 c:/Users/kenny/Documents/github/jeantech-salecrm_neo",
+      "expected_output": "涵蓋範圍內所有單號，且未省略 #0000／無單號的 commit（標為「無單號」並在備註列出 commit），輸出可貼上的 TSV 檔",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "含SQL異動需摘出語句",
+      "prompt": "整理 #4083 和跟 tblCase 加身分證欄位那張單的版更項目，repo: c:/Users/kenny/Documents/github/jeantech-salecrm_neo，另外幫我確認要填的重大功能有哪些",
+      "expected_output": "異動SQL 欄摘出實際 ALTER TABLE 語句而非只寫檔名；重大功能欄只採用該檢核文件實際存在的模組名，並在文件仍為電商範本值時主動提醒不符專案領域",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "標出本次重大功能必檢項目",
+      "prompt": "HEAD~8..HEAD 這次上線，重大功能檢核清單哪幾項要重點檢？repo 在 c:/Users/kenny/Documents/github/jeantech-salecrm_neo",
+      "expected_output": "以路由對應標出 ★必檢／⚠連帶檢並各附具體檔案或 commit 理由；共用檔（shared.service.ts、helper）有用 codegraph 回推呼叫端；明確聲明這是重點排序而非可只檢這些（文件規定全數檢核）",
+      "files": []
+    }
+  ]
+}

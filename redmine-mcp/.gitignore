@@ -1,0 +1,12 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+downloads/
+.pytest_cache/
+
+# 含 API key 的實際設定檔，只有 config.example.toml 進版控
+config.toml
+
+# SDD 工作區（暫存用，不進版控）
+.superpowers/

@@ -1,0 +1,9 @@
+# redmine-issue-skills 不是 Python 套件：產物是 Markdown 與 shell 腳本，安裝時
+# 不需要 Python。這份 pyproject.toml 只用來承載 pytest 與 ruff 設定，讓
+# `python -m pytest` 在本目錄下直接跑得起來。
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

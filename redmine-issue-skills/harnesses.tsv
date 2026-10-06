@@ -1,0 +1,11 @@
+# id	家目錄標記	CLI 名	類別	指示檔（相對於 $HOME）
+# 類別：native=原生 skill 機制；fallback=有可寫入的 Markdown 全域指示檔；
+#      manual=偵測得到但沒有可寫入的 Markdown 指示檔，只印路徑
+claude-code	.claude	claude	native	.claude/skills
+codex	.codex	codex	native	.codex/skills
+gemini-cli	.gemini	gemini	fallback	.gemini/GEMINI.md
+opencode	.config/opencode	opencode	manual	
+amp	.amp	amp	manual	
+continue	.continue		manual	
+cursor	.cursor	cursor-agent	manual	
+copilot-cli		copilot	manual	

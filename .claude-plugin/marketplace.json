@@ -1,0 +1,8 @@
+{
+  "name": "redmine-plugins",
+  "description": "Redmine MCP 與技能套件",
+  "owner": { "name": "Kenny Zheng" },
+  "plugins": [
+    { "name": "redmine", "source": "./", "description": "Redmine MCP 與三個工作流程技能" }
+  ]
+}

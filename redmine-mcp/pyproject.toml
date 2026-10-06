@@ -1,0 +1,137 @@
+[project]
+name = "redmine-mcp"
+version = "0.14.1"
+description = "MCP server for Redmine REST API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Kenny Zheng", email = "kenny.zheng@shinda.com.tw" }]
+keywords = ["mcp", "redmine", "claude", "issue-tracker"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Bug Tracking",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mcp>=2.0,<3",
+    # 上界不可省略：uv.lock 只約束本專案的開發環境，使用者以 uvx／pip 安裝時解析的是
+    # 這裡的範圍。而 pycurl_transport 的正確性建立在 httpx 的具體行為上——
+    # AsyncBaseTransport 介面、`request.headers.raw` 保留原始大小寫（那正是本模組
+    # 存在的理由）、follow_redirects=False 的語意、aiter_bytes() 的串流分塊。
+    # 一次 major 升版就可能讓這些靜默退化，而使用者環境的版本與 CI 不同，測試不會示警。
+    "httpx>=0.27,<1",
+    # 以下兩者只有 `redmine-mcp setup` 這條路徑會 import；server 啟動路徑刻意不碰，
+    # 詳見 __main__.py 的 entrypoint() 說明。
+    # rich 雖然本來就是 typer 的傳遞相依，但精靈直接 import 它，就必須自己宣告——
+    # 依賴傳遞相依是隱性耦合，typer 改包裝就會斷。
+    "typer>=0.21,<1",
+    # 上界取 <16：目前實測可用到 rich 15.x，設 <15 反而會把可用版本降級。
+    "rich>=13,<16",
+    # 安裝精靈的方向鍵選單（單選與空白鍵多選）。非 IT 同事被要求「輸入 1,2」時會停下來
+    # 問人，而跨 Windows 主控台／WSL／各種終端的按鍵處理自己寫必踩一輪邊界情況，
+    # 交給 questionary（prompt_toolkit）處理。畫不出來時一律退回原本輸入編號的問法，
+    # 見 wizard.py 的 _方向鍵單選()／_方向鍵多選()，因此它不是流程的必要條件。
+    "questionary>=2,<3",
+    # HTTP 請求經由 libcurl（pycurl）在行程內送出，繞過站台 Cloudflare 對 Python ssl
+    # 的 TLS 指紋阻擋；詳見 src/redmine_mcp/pycurl_transport.py 模組說明。
+    "pycurl>=7.45,<8",
+]
+
+[project.urls]
+Homepage = "https://github.com/Shinspire/MCP/tree/main/redmine-mcp"
+Issues = "https://github.com/Shinspire/MCP/issues"
+
+[project.scripts]
+redmine-mcp = "redmine_mcp.__main__:entrypoint"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# scripts/ 是發佈用的輔助程式，不隨套件安裝，因此不在 src 的匯入路徑上；
+# 加進 pythonpath 才能對它寫單元測試。
+pythonpath = ["scripts"]
+
+[tool.ruff]
+# 沿用專案既有的行寬習慣（多行說明性註解與長訊息字串），不為了縮排硬折。
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes：未使用的 import／變數
+    "I",   # isort：import 排序
+    "UP",  # pyupgrade：過時語法
+    "B",   # flake8-bugbear：常見陷阱
+    "RUF", # ruff 自有規則
+]
+ignore = [
+    # 本專案的註解、docstring 與錯誤訊息一律使用繁體中文，全形標點（，、（）—）
+    # 會被判定為「與 ASCII 相似的模糊字元」。這在中文語境下是正確寫法而非錯誤，
+    # 全開會產生 700 多筆無意義告警，淹掉真正該看的問題。
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 測試以中文函式名描述情境，且刻意保留較長的斷言字串。
+# B017：MCP SDK 對工具內例外的包裝型別由 SDK 決定，測試只驗訊息內容。
+"tests/*" = ["E501", "B017"]
+
+[tool.mypy]
+python_version = "3.11"
+# scripts/ 一併納入：發佈流程壞掉的發現時機是「打了 tag 才知道」，成本比一般
+# 開發期錯誤高，值得用同一套型別標準把關。
+files = ["src", "scripts"]
+# 套件已附 py.typed，對外承諾型別正確，因此公開介面一律要求標註。
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+# MCP SDK 的 decorator 未附完整型別資訊，工具註冊處無法避免 Any。
+module = "mcp.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# pycurl 未提供型別標註套件（types-pycurl 亦非官方維護），忽略其匯入型別檢查。
+module = "pycurl"
+ignore_missing_imports = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/redmine_mcp"]
+
+[tool.hatch.build.targets.sdist]
+# 明列內容，避免 hatchling 預設把快取目錄、實際的 config.toml（含 API key）
+# 等非發佈物一併塞進 sdist。
+include = [
+    "src/",
+    "tests/",
+    "README.md",
+    "SETUP.md",
+    "LICENSE",
+    "config.example.toml",
+    "pyproject.toml",
+]

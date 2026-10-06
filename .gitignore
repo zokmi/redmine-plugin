@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.test-deps/
+.verify-deps/
+dist/
+build/
+*.egg-info/
+config.toml
+.env
+.installed.json
+downloads/
