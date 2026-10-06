@@ -18,7 +18,7 @@
 在 Claude Code 互動工作階段執行：
 
 ```text
-/plugin marketplace add zokmi/redmine-plugin
+/plugin marketplace add https://github.com/zokmi/redmine-plugin.git
 /plugin install redmine@redmine-plugins
 ```
 
@@ -28,7 +28,7 @@
 ## 安裝到 Codex
 
 ```text
-codex plugin marketplace add zokmi/redmine-plugin --ref main
+codex plugin marketplace add https://github.com/zokmi/redmine-plugin.git --ref main
 codex plugin add redmine@redmine-plugins
 ```
 
