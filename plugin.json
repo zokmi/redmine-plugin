@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "redmine",
-  "version": "0.14.4",
+  "version": "0.14.5",
   "description": "Redmine MCP 與三個工作流程：查詢與維護單子、撰寫 bug／change／feature、查核程式異動、整理版更檢核項目。",
   "author": {
     "name": "zokmi"

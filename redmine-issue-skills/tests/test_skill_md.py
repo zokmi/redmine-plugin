@@ -89,7 +89,8 @@ def test_交付規則要求標題與內文分開():
     text = SKILL_MD.read_text(encoding="utf-8")
 
     assert "主題" in text and "概述" in text
-    assert "先印" in text, "SKILL.md 未寫明先印在對話裡的交付規則"
+    assert "分兩個圍欄區塊" in text
+    assert "已授權直接寫入" in text
 
 
 def test_明講沒有上傳能力():
@@ -97,7 +98,8 @@ def test_明講沒有上傳能力():
     # 而那個檔名在 Redmine 上並不存在，圖片永遠是破的。
     text = SKILL_MD.read_text(encoding="utf-8")
 
-    assert "附件區" in text, "SKILL.md 未交代截圖要由使用者自己拖進附件區"
+    assert "upload_attachment" in text and "uploads" in text
+    assert "需手動附檔" in text and "未完成上傳不宣稱完成" in text
 
 
 def test_指出新功能開發要拆子單並指路到骨架():
@@ -117,7 +119,7 @@ def test_落點交代新需求沒有註記落點():
     # 又一則註記，而概述停在第一版——這件事漏了不會有任何東西報錯。
     text = SKILL_MD.read_text(encoding="utf-8")
 
-    assert "它沒有註記落點" in text, "SKILL.md 未交代新需求沒有註記落點"
+    assert "母單 description，不堆註記" in text
     assert "DB 子單的概述" in text, "SKILL.md 未指出資料表與關聯要寫進 DB 子單的概述"
 
 

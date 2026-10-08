@@ -1,6 +1,6 @@
 ---
 name: redmine-issue-writing
-description: 當使用者要開、撰寫或整理 Redmine bug、change、feature 單，或需要可貼上的主題與概述時使用。
+description: 當使用者要開單、撰寫或整理 Redmine 臭蟲（bug）、調整（change）、新需求（feature）單，或需要可貼上的主題與概述時使用。
 ---
 
 # 撰寫 Redmine 單子

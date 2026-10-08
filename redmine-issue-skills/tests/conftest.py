@@ -30,4 +30,10 @@ def guide(kind: str, stage: str | None = None) -> str:
     回傳:
         骨架的 Markdown 全文。
     """
-    return (REFERENCES / GUIDE_PATHS[(kind, stage)]).read_text(encoding="utf-8")
+    path = REFERENCES / GUIDE_PATHS[(kind, stage)]
+    text = path.read_text(encoding="utf-8")
+    # Content contracts cover both the concise entry and its on-demand details.
+    details = path.with_name(path.stem + "-details.md")
+    if details.is_file():
+        text += "\n" + details.read_text(encoding="utf-8")
+    return text

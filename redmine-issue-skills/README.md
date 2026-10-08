@@ -1,7 +1,5 @@
-# Redmine issue skills 參考資料
+# Redmine issue skills 相容資料
 
-這個目錄保留 Redmine 單子格式、references 與測試資料，作為 plugin 內容的維護參考。對外安裝一律使用根目錄的 `redmine` plugin；請勿直接複製這個目錄到某個 agent 的 skills 目錄。
+唯一維護來源是 `skills/redmine-issue-writing/`。本目錄的 `SKILL.md` 與 `references/` 是同步副本，保留給歷史指標與內容測試使用；不要獨立修改。修改來源後同步相同相對路徑，並執行 `tests/test_canonical_sync.py` 驗證。
 
-請依根目錄 [README](../README.md) 加入本機 marketplace，再安裝 `redmine@redmine-plugins`。plugin 會載入 `skills/` 下的三個技能，並由 plugin 管理器負責更新與移除。
-
-`redmine-issue-skills/SKILL.md` 是舊版通用指引的來源檔，不是另一個安裝入口。
+對外安裝一律使用根目錄的 `redmine` plugin；請依根目錄 [README](../README.md) 安裝。plugin 載入 `skills/` 下的四個技能，由 plugin 管理器更新與移除。工作區同步不會更新使用者家目錄或已安裝的 plugin。
