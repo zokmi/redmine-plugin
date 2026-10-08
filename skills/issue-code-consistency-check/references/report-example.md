@@ -2,6 +2,9 @@
 
 報告在對話中呈現，結構如下：
 
+每個一致性判定都要以具體 `檔案:行號 (commit)` 為證據；只有「有改到某檔案」而沒有對應條目的，不能判定為一致。
+報告必須同時呈現正向（需求到程式）與反向（程式到需求）比對。
+
 ```markdown
 ## 查核範圍
 Repo：<路徑>｜範圍：<spec>｜單數：N｜commit 數：N
@@ -28,4 +31,10 @@ Repo：<路徑>｜範圍：<spec>｜單數：N｜commit 數：N
 
 ## 結論
 一致 N 張、部分不一致 N 張、無法查核 N 張。最需要處理的是：<具體項目>
+
+## BDD 寫入閘門結果
+
+選用 skill：`issue-code-consistency-check`（原因：Redmine issue 與程式異動需雙向比對）
+審核結果：`PASS`／`FAIL`／`UNVERIFIED`／`UNAVAILABLE`
+Redmine 寫入：只有 `PASS` 可執行；其他結果必須停止寫入並保留報告與證據。
 ```

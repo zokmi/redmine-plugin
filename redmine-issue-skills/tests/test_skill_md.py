@@ -10,6 +10,10 @@ from tests.conftest import GUIDE_PATHS, REFERENCES
 
 #: skill 的路由指示檔。
 SKILL_MD = Path(__file__).resolve().parents[1] / "SKILL.md"
+PLUGIN_ROOT = SKILL_MD.parents[1]
+CONSISTENCY_SKILL_MD = PLUGIN_ROOT / "skills" / "issue-code-consistency-check" / "SKILL.md"
+CONSISTENCY_REPORT = PLUGIN_ROOT / "skills" / "issue-code-consistency-check" / "references" / "report-example.md"
+BDD_NOTE = PLUGIN_ROOT / "skills" / "redmine-issue-writing" / "references" / "bdd-verification-note.md"
 
 #: 落點的四組字面值。與 server 指示詞用同一組寫法，讓兩邊可互相比對；
 #: 省略 stage 的 change／feature 沒有 "+" 形式，改由路徑測試涵蓋。
@@ -115,3 +119,24 @@ def test_落點交代新需求沒有註記落點():
 
     assert "它沒有註記落點" in text, "SKILL.md 未交代新需求沒有註記落點"
     assert "DB 子單的概述" in text, "SKILL.md 未指出資料表與關聯要寫進 DB 子單的概述"
+
+
+def test_一致性查核支援動態_skill_選擇與放行閘門():
+    text = CONSISTENCY_SKILL_MD.read_text(encoding="utf-8")
+
+    for marker in ("動態選擇", "issue 系統", "repo 路徑", "可用 skill", "UNAVAILABLE", "只有 `PASS`"):
+        assert marker in text, f"一致性 skill 缺少動態選擇契約：{marker}"
+
+
+def test_一致性報告要求逐項證據與檔案行號_commit():
+    text = CONSISTENCY_REPORT.read_text(encoding="utf-8")
+
+    for marker in ("需求條目", "檔案:行號", "commit", "正向", "反向"):
+        assert marker in text, f"一致性報告範例缺少：{marker}"
+
+
+def test_BDD_Redmine_註記模板要求修正項目與圖片一對一():
+    text = BDD_NOTE.read_text(encoding="utf-8")
+
+    for marker in ("修正項目 1", "圖片 1", "修正項目 2", "圖片 2", "截圖不適用"):
+        assert marker in text, f"BDD 註記模板缺少：{marker}"

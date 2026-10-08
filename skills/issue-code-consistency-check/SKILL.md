@@ -18,6 +18,29 @@ description: 當使用者要查核、稽核或驗收 Redmine 單號是否由程�
 **只報告，不動手改。** 發現漏做就寫清楚問題、證據與影響，修不修、怎麼修由使用者決定。
 查核者順手改程式會讓「誰查核誰」失去意義，而且改完之後報告裡的證據就跟現況對不上了。
 
+## 動態選 skill 與 Redmine 寫入閘門
+
+BDD 全通過後、任何 Redmine 寫入前，主流程要依當下上下文動態選擇一致性審核 skill，
+不可把某個 skill 名稱硬編碼成所有專案的唯一入口。選擇器至少提供：
+
+- issue 系統與單號、完整需求來源（描述與註解）
+- repo 路徑、目前分支、基準與受測 commit 範圍
+- 本輪修正項目、BDD 報告、`verification.json` 與證據位置
+- 當下可用 skill 的名稱、描述、版本與讀取路徑
+
+依 skill 的觸發條件與上述上下文評分；Redmine issue 且需求要和程式異動逐條比對時，
+優先選本 skill。若沒有 skill 能同時讀取需求與 git 事實，回傳 `UNAVAILABLE`，不得繞過審核。
+
+審核子代理必須唯讀執行，只回傳查核報告，不修改程式、測試、BDD 證據或 issue。結果固定為：
+
+- `PASS`：每個需求條目都有具體證據，且沒有未處理的範圍外異動。
+- `FAIL`：發現漏做或範圍外異動；列出需求條目、檔案:行號與 commit。
+- `UNVERIFIED`：需求、版本範圍或證據不足，列出需要補齊的資料。
+- `UNAVAILABLE`：沒有適用的審核 skill 或無法啟動唯讀子代理。
+
+只有 `PASS` 可以進入 Redmine 更新；其他結果都要保留 BDD 輸出並回報阻擋原因。
+若流程可執行本 plugin 的腳本，使用 `scripts/consistency_gate.py` 的 `select_skill(context)` 選擇器與 `can_update_redmine(evidence)` 閘門；兩者都是純函式，不會自行修改檔案或呼叫 Redmine。
+
 ## 步驟 1：確認查核範圍
 
 開始之前必須確定三件事。使用者的話裡已經講明的就沿用，缺的才問：
