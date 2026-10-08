@@ -46,4 +46,4 @@ description: 當使用者要開、撰寫或整理 Redmine bug、change、feature
 
 ### BDD 驗證註記
 
-BDD 全通過後要逐項回報修正內容，每個 `修正項目 N` 後面必須緊接對應的 `圖片 N`；完整欄位與 API／DB 沒有截圖時的替代證據格式，見 `references/bdd-verification-note.md`。
+BDD 全通過後給 PM 的註記只呈現「修正項目 N／結果／圖片 N」；根因、Scenario、commit、檔案行號與一致性審核細節留在 BDD 報告，API／DB 沒有截圖時使用替代驗證結果。完整格式見 `references/bdd-verification-note.md`。

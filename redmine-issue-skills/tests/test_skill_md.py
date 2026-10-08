@@ -138,5 +138,7 @@ def test_一致性報告要求逐項證據與檔案行號_commit():
 def test_BDD_Redmine_註記模板要求修正項目與圖片一對一():
     text = BDD_NOTE.read_text(encoding="utf-8")
 
-    for marker in ("修正項目 1", "圖片 1", "修正項目 2", "圖片 2", "截圖不適用"):
+    for marker in ("修正結果", "修正項目 1", "結果：已修正", "圖片 1", "修正項目 2", "圖片 2", "截圖不適用"):
         assert marker in text, f"BDD 註記模板缺少：{marker}"
+    for technical in ("驗證情境：", "驗證版本：", "根因："):
+        assert technical not in text, f"PM 註記不應包含技術欄位：{technical}"
