@@ -84,7 +84,7 @@ def _text(value):
     text = str(value)
     # Mask URL userinfo and credential assignments in examples and descriptions.
     text = re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1[REDACTED]@", text, flags=re.I)
-    text = re.sub(r"((?:password|passwd|pwd|token|secret|api[-_]?key|connection[-_]?string)\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s;&|]+)",
+    text = re.sub(r"((?:" + SENSITIVE.pattern + r")\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s;&|]+)",
                   r"\1[REDACTED]", text, flags=re.I)
     text = re.sub(r"[0-9a-fA-F]{64}\b", "[INTERNAL HASH OMITTED]", text)
     return text.replace("\r", " ").replace("\n", " ").replace("|", "\\|").replace("`", "\\`")
@@ -92,23 +92,36 @@ def _text(value):
 
 def _structure(analysis, excluded):
     included_units = [unit for unit in analysis.units if unit["unit_id"] not in excluded]
+    included_ids = {unit["unit_id"] for unit in included_units}
     changes = getattr(analysis, "structure_changes", None)
     if changes is None:
-        changes = [change for unit in included_units for change in unit.get("structure_changes", [])]
+        changes = []
+        for unit in included_units:
+            for change in unit.get("structure_changes", []):
+                if not isinstance(change, dict):
+                    raise ValueError("Invalid structure change descriptor")
+                changes.append({**change, "unit_id": unit["unit_id"]})
     if not isinstance(changes, list):
         raise ValueError("Structure changes must be explicit descriptors")
     grouped = {kind: [] for kind in KINDS}
+    unproven_scope = False
     for change in changes:
         if not isinstance(change, dict) or change.get("kind") not in KINDS:
             raise ValueError("Invalid structure change descriptor")
         if any(not isinstance(change.get(k), str) or not change[k].strip() for k in ("name", "description", "impact")):
             raise ValueError("Structure change requires scope, description and impact")
-        if change.get("unit_id") in excluded:
+        unit_id = change.get("unit_id")
+        if isinstance(unit_id, str) and unit_id in excluded:
+            continue
+        if not isinstance(unit_id, str) or unit_id not in included_ids:
+            unproven_scope = True
             continue
         grouped[change["kind"]].append("- " + _text(change["name"]) + "：" + _text(change["description"]) + "；影響：" + _text(change["impact"]))
     lines = []
     for kind, label in KINDS.items():
         lines.append("### " + label + "\n\n" + ("\n".join(grouped[kind]) or "未提供此類結構異動範圍，待確認。"))
+    if unproven_scope:
+        lines.append("結構異動說明待確認：忽略缺少或無效單位來源的描述。")
     if not any(grouped.values()) and any(u["phase"] in ("SCHEMA", "REPAIR") for u in included_units):
         objects = sorted({obj for u in included_units if u["phase"] in ("SCHEMA", "REPAIR") for obj in u.get("objects", [])})
         lines.append("結構異動說明待確認；來源宣告物件：" + ("、".join(_text(obj) for obj in objects) or "待確認"))
@@ -142,6 +155,8 @@ def _status(metadata, artifact):
             if isinstance(rounds, dict) and all(
                     isinstance(rounds.get(name), dict) and rounds[name].get("status") == "passed"
                     and type(rounds[name].get("exit_code")) is int and rounds[name]["exit_code"] == 0
+                    and isinstance(rounds[name].get("error_output_summary"), str)
+                    and (name != "injected_failure" or bool(rounds[name]["error_output_summary"].strip()))
                     and all(rounds[name].get(k) for k in fields)
                     for name in ("validate_only", "commit", "rerun", "injected_failure")):
                 status = "通過（隔離 evidence 已記錄）"

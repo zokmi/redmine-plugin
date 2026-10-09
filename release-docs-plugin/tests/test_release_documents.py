@@ -45,6 +45,8 @@ def inputs(tmp_path):
         {"kind": "constraint", "name": "CK_Customer", "description": "限制識別值", "impact": "阻擋無效資料"},
         {"kind": "extended_property", "name": "dbo.Customer.MS_Description", "description": "補充欄位說明", "impact": "更新中繼資料"},
     ]
+    for change in analysis.structure_changes:
+        change["unit_id"] = "customer"
     manifest = write_lifecycle_run(tmp_path / ".release-docs/runs/run-1", analysis)
     artifact = assemble_deployment_sql(analysis.units, tmp_path / "assembly/01_部署SQL.sql", {"validate_only": 1, "release_id": "release-42"})
     return analysis, artifact, manifest
@@ -290,9 +292,11 @@ def test_localdb_status_accepts_only_complete_current_artifact_evidence(tmp_path
     evidence = {"status": "passed", "exit_code": 0, "server": "(localdb)\\test",
                 "database": "disposable", "provider_version": "SQL Server test",
                 "tool_version": "runner test", "baseline_source": "old.sql", "fixture_source": "fixture.sql",
-                "command": "isolated runner", "checks": ["all checks passed"]}
+                "command": "isolated runner", "checks": ["all checks passed"],
+                "error_output_summary": ""}
     metadata["localdb_validation"] = {"status": "passed", "artifact_sha256": artifact.sha256,
-                                     "rounds": {name: evidence for name in ("validate_only", "commit", "rerun", "injected_failure")}}
+                                     "rounds": {name: dict(evidence) for name in ("validate_only", "commit", "rerun", "injected_failure")}}
+    metadata["localdb_validation"]["rounds"]["injected_failure"]["error_output_summary"] = "Expected THROW 51000, rollback and later-unit stop confirmed"
     path.write_text(json.dumps(metadata))
     module.render_release_documents(analysis, artifact, manifest, tmp_path / "complete")
     assert "LocalDB：通過" in (tmp_path / "complete/00_上線指引.md").read_text(encoding="utf-8")
@@ -343,3 +347,94 @@ def test_windows_ambiguous_segments_cannot_escape_path_checks(tmp_path, suffix):
     with pytest.raises(ValueError):
         module.render_release_documents(analysis, artifact, manifest, tmp_path / suffix)
     assert not (tmp_path / "operator").exists()
+
+
+@pytest.mark.parametrize("field", ["format_example", "apply", "reload", "validation"])
+@pytest.mark.parametrize("assignment", ["credential", "private_key"])
+def test_sensitive_assignments_in_nonsensitive_parameter_prose_are_redacted(tmp_path, field, assignment):
+    module = api()
+    analysis, artifact, manifest = inputs(tmp_path)
+    change = {"environment": "Production", "service": "CustomerAPI", "key": "Service:Url",
+              "format_example": "https://example.test/", "apply": "更新設定", "reload": "reload", "validation": "healthy"}
+    change[field] = "https://example.test/?" + assignment + "=LEAKED_VALUE&mode=test"
+    analysis.parameter_changes = [change]
+    module.render_release_documents(analysis, artifact, manifest, tmp_path / "operator")
+    text = (tmp_path / "operator/02_參數異動.md").read_text(encoding="utf-8")
+    assert "LEAKED_VALUE" not in text
+    assert assignment + "=[REDACTED]&mode=test" in text
+
+
+def test_sensitive_assignments_in_guide_descriptions_are_redacted(tmp_path):
+    module = api()
+    analysis, artifact, manifest = inputs(tmp_path)
+    analysis.structure_changes[0]["description"] = "credential='LEAKED CREDENTIAL'; private_key=LEAKED_KEY"
+    module.render_release_documents(analysis, artifact, manifest, tmp_path / "operator")
+    text = (tmp_path / "operator/00_上線指引.md").read_text(encoding="utf-8")
+    assert "LEAKED CREDENTIAL" not in text and "LEAKED_KEY" not in text
+    assert "credential=[REDACTED]" in text and "private_key=[REDACTED]" in text
+
+
+@pytest.mark.parametrize("unit_id", [None, "unknown"])
+def test_unproven_top_level_structure_scope_cannot_reintroduce_excluded_objects(tmp_path, unit_id):
+    module = api()
+    analysis, artifact, manifest = inputs(tmp_path)
+    change = {"kind": "table", "name": "dbo.Core", "description": "建立排除核心表", "impact": "排除影響"}
+    if unit_id is not None:
+        change["unit_id"] = unit_id
+    analysis.structure_changes.append(change)
+    module.render_release_documents(analysis, artifact, manifest, tmp_path / "operator")
+    text = (tmp_path / "operator/00_上線指引.md").read_text(encoding="utf-8")
+    structure = text.split("## 結構異動範圍與說明", 1)[1].split("## 本次排除摘要", 1)[0]
+    assert "dbo.Core" not in structure and "建立排除核心表" not in structure
+    assert "待確認" in structure
+    assert "建立客戶主檔" in structure
+
+
+def test_unit_level_structure_description_inherits_its_included_source_unit(tmp_path):
+    module = api()
+    analysis, artifact, manifest = inputs(tmp_path)
+    del analysis.structure_changes
+    analysis.units[0]["structure_changes"] = [{"kind": "table", "name": "dbo.Customer",
+                                               "description": "建立客戶主檔", "impact": "提供客戶查詢"}]
+    module.render_release_documents(analysis, artifact, manifest, tmp_path / "operator")
+    assert "建立客戶主檔" in (tmp_path / "operator/00_上線指引.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("round_name", ["validate_only", "commit", "rerun", "injected_failure"])
+@pytest.mark.parametrize("summary", [None, 123])
+def test_localdb_round_without_explicit_error_output_summary_remains_pending(tmp_path, round_name, summary):
+    module = api()
+    analysis, artifact, manifest = inputs(tmp_path)
+    path = manifest.parent / "lifecycle_metadata.json"
+    metadata = json.loads(path.read_text())
+    evidence = {"status": "passed", "exit_code": 0, "server": "(localdb)\\test", "database": "disposable",
+                "provider_version": "SQL Server test", "tool_version": "runner test", "baseline_source": "old.sql",
+                "fixture_source": "fixture.sql", "command": "isolated runner", "checks": ["all checks passed"],
+                "error_output_summary": ""}
+    rounds = {name: dict(evidence) for name in ("validate_only", "commit", "rerun", "injected_failure")}
+    rounds["injected_failure"]["error_output_summary"] = "Expected unit error, rollback and stop confirmed"
+    if summary is None:
+        del rounds[round_name]["error_output_summary"]
+    else:
+        rounds[round_name]["error_output_summary"] = summary
+    metadata["localdb_validation"] = {"status": "passed", "artifact_sha256": artifact.sha256, "rounds": rounds}
+    path.write_text(json.dumps(metadata))
+    module.render_release_documents(analysis, artifact, manifest, tmp_path / "operator")
+    text = (tmp_path / "operator/00_上線指引.md").read_text(encoding="utf-8")
+    assert "LocalDB：待確認" in text and "LocalDB：通過" not in text
+
+
+def test_injected_failure_without_recorded_expected_error_remains_pending(tmp_path):
+    module = api()
+    analysis, artifact, manifest = inputs(tmp_path)
+    path = manifest.parent / "lifecycle_metadata.json"
+    metadata = json.loads(path.read_text())
+    evidence = {"status": "passed", "exit_code": 0, "server": "(localdb)\\test", "database": "disposable",
+                "provider_version": "SQL Server test", "tool_version": "runner test", "baseline_source": "old.sql",
+                "fixture_source": "fixture.sql", "command": "isolated runner", "checks": ["all checks passed"],
+                "error_output_summary": ""}
+    metadata["localdb_validation"] = {"status": "passed", "artifact_sha256": artifact.sha256,
+                                     "rounds": {name: dict(evidence) for name in ("validate_only", "commit", "rerun", "injected_failure")}}
+    path.write_text(json.dumps(metadata))
+    module.render_release_documents(analysis, artifact, manifest, tmp_path / "operator")
+    assert "LocalDB：待確認" in (tmp_path / "operator/00_上線指引.md").read_text(encoding="utf-8")
