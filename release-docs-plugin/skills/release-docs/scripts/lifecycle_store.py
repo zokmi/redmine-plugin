@@ -52,6 +52,10 @@ def write_lifecycle_run(run_root, analysis_result, localdb_validation=None,
             raise ValueError("Linked lifecycle files are not permitted")
         if destination.exists() and destination.read_bytes() != data:
             raise ValueError("Lifecycle evidence is immutable; create a new run")
+    root.parent.mkdir(parents=True, exist_ok=True)
+    # Sweep only expired, explicitly owned temporary material at run start;
+    # permanent lifecycle evidence is retained.
+    sweep_expired_lifecycle_runs(root.parent.parent)
     root.mkdir(parents=True, exist_ok=True)
     ignore = root.parent.parent / ".gitignore"
     if ignore.is_symlink() or (ignore.exists() and (ignore.is_junction() or os.stat(ignore).st_nlink != 1)):
