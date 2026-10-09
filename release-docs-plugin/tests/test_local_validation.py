@@ -35,9 +35,25 @@ def test_production_server_is_rejected_before_executor(tmp_path):
     assert calls == []
 
 
+def test_localdb_server_must_be_anchored_and_named_instance(tmp_path):
+    artifact = tmp_path / "01.sql"
+    artifact.write_text("SELECT 1;", encoding="utf-8")
+    for server in ("prod(localdb)\\MSSQLLocalDB", "prefix(localdb)\\MSSQLLocalDB", "(localdb)\\MSSQLLocalDB extra"):
+        try:
+            module.run_local_validation(artifact, server=server, database="test", executor=lambda **kw: {})
+        except ValueError as exc:
+            assert "LocalDB" in str(exc)
+        else:
+            raise AssertionError(server)
+
+
 def test_four_rounds_use_fresh_sessions_and_expected_transaction_contract(tmp_path):
     artifact = tmp_path / "01.sql"
     artifact.write_text("-- artifact\n", encoding="utf-8")
+    baseline = tmp_path / "old-schema.sql"
+    fixture = tmp_path / "test-data.sql"
+    baseline.write_text("CREATE TABLE old_table (id int);", encoding="utf-8")
+    fixture.write_text("INSERT INTO old_table VALUES (1);", encoding="utf-8")
     calls = []
 
     def executor(**kwargs):
@@ -52,8 +68,9 @@ def test_four_rounds_use_fresh_sessions_and_expected_transaction_contract(tmp_pa
 
     result = module.run_local_validation(
         artifact, server="(localdb)\\MSSQLLocalDB", database="release_test",
-        baseline_source="fixtures/old-schema.sql", fixture_source="fixtures/test-data.sql",
+        baseline_source=str(baseline), fixture_source=str(fixture),
         executor=executor, command=["sqlcmd", "-S", "(localdb)\\MSSQLLocalDB"],
+        adapter_provenance="fake-disposable-adapter/1",
     )
     assert result["status"] == "passed"
     assert len(calls) == 4
@@ -63,20 +80,40 @@ def test_four_rounds_use_fresh_sessions_and_expected_transaction_contract(tmp_pa
     assert calls[3]["inject_failure"] is True
     assert len({c["baseline_source"] for c in calls}) == 4
     assert all(r["provider_version"] and r["tool_version"] for r in result["rounds"].values())
+    assert all(r["baseline_sha256"] and r["fixture_sha256"] for r in result["rounds"].values())
 
 
 def test_executor_failure_is_structured_and_never_claims_pass(tmp_path):
     artifact = tmp_path / "01.sql"
     artifact.write_text("SELECT 1;", encoding="utf-8")
+    baseline = tmp_path / "old.sql"
+    fixture = tmp_path / "data.sql"
+    baseline.write_text("old", encoding="utf-8")
+    fixture.write_text("data", encoding="utf-8")
 
     def executor(**kwargs):
         return {"status": "failed", "exit_code": 1, "checks": ["rollback attempted"],
                 "error_output_summary": "SQL ERROR_NUMBER=50001 phase=DATA"}
 
-    result = module.run_local_validation(artifact, server="(localdb)\\MSSQLLocalDB", database="test", executor=executor)
+    result = module.run_local_validation(artifact, server="(localdb)\\MSSQLLocalDB", database="test",
+                                         baseline_source=str(baseline), fixture_source=str(fixture),
+                                         adapter_provenance="fake/1", executor=executor)
     assert result["status"] == "failed"
     assert result["rounds"]["validate_only"]["exit_code"] == 1
     assert "SQL ERROR_NUMBER" in result["rounds"]["validate_only"]["error_output_summary"]
+
+
+def test_executor_requires_real_fixture_paths_and_adapter_provenance(tmp_path):
+    artifact = tmp_path / "01.sql"
+    artifact.write_text("SELECT 1;", encoding="utf-8")
+    for kwargs in ({"adapter_provenance": ""}, {"adapter_provenance": "fake/1", "baseline_source": "missing", "fixture_source": "missing"}):
+        try:
+            module.run_local_validation(artifact, server="(localdb)\\MSSQLLocalDB", database="test",
+                                        executor=lambda **kw: {}, **kwargs)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid adapter or fixture must block a pass")
 
 
 def test_evidence_can_be_written_inside_lifecycle_only(tmp_path):
