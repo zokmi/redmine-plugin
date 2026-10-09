@@ -91,6 +91,10 @@ def run_local_validation(
         raise ValueError("executor must be callable")
     if not adapter_provenance.strip():
         raise ValueError("Actual LocalDB validation requires adapter provenance")
+    if not provider_version.strip() or provider_version == "unknown":
+        raise ValueError("Actual LocalDB validation requires provider version")
+    if not tool_version.strip() or tool_version == "unknown":
+        raise ValueError("Actual LocalDB validation requires tool version")
     if not baseline_sha256 or not fixture_sha256:
         raise ValueError("baseline_source and fixture_source must be existing regular files")
 

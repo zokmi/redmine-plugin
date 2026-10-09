@@ -5,7 +5,8 @@ import os
 import re
 
 
-def write_lifecycle_run(run_root, analysis_result, localdb_validation=None):
+def write_lifecycle_run(run_root, analysis_result, localdb_validation=None,
+                        execution_artifact=None, operator_contract=None):
     """Persist deterministic metadata, rejecting operator paths and replacement."""
     requested = Path(run_root)
     if ".." in requested.parts:
@@ -26,6 +27,10 @@ def write_lifecycle_run(run_root, analysis_result, localdb_validation=None):
         if not isinstance(localdb_validation, dict) or localdb_validation.get("schema_version") != 1:
             raise ValueError("Invalid LocalDB validation evidence")
         lifecycle_metadata["localdb_validation"] = localdb_validation
+    if execution_artifact is not None:
+        lifecycle_metadata["execution_artifact"] = execution_artifact
+    if operator_contract is not None:
+        lifecycle_metadata["operator_contract"] = operator_contract
     documents = {
         "lifecycle_exclusion_manifest.json": {"schema_version": 1, "exclusions": analysis_result.exclusions},
         "source_unit_metadata.json": {
@@ -53,3 +58,33 @@ def write_lifecycle_run(run_root, analysis_result, localdb_validation=None):
             with destination.open("xb") as stream:
                 stream.write(data)
     return root / "lifecycle_exclusion_manifest.json"
+
+
+def cleanup_lifecycle_run(run_root, *, outcome):
+    """Apply retention policy to one lifecycle run after review/deployment.
+
+    Successful runs remove only owned temporary material; immutable manifests,
+    review records and execution evidence remain available for traceability.
+    Failed runs remain available for the configured seven-day retention job.
+    """
+    requested = Path(run_root)
+    if ".." in requested.parts:
+        raise ValueError("Traversal is not permitted in lifecycle paths")
+    root = requested.absolute()
+    if (root.parent.name != "runs" or root.parent.parent.name != ".release-docs"
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", root.name)):
+        raise ValueError("Run must be inside lifecycle .release-docs/runs/<run-id>")
+    if outcome != "success":
+        return False
+    if not root.exists():
+        return False
+    removed = False
+    for name in ("temporary", ".tmp"):
+        child = root / name
+        if child.is_dir() and not child.is_symlink():
+            for nested in child.rglob("*"):
+                if nested.is_file() and not nested.is_symlink():
+                    nested.unlink()
+            child.rmdir()
+            removed = True
+    return removed

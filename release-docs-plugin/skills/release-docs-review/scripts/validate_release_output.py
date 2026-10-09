@@ -74,6 +74,8 @@ def _deployment(metadata, digest):
                 or not isinstance(evidence.get("command"), (str, list)) or not evidence["command"]
                 or not isinstance(evidence.get("checks"), (list, dict)) or not evidence["checks"]
                 or not isinstance(evidence.get("error_output_summary"), str)
+                or evidence.get("provider_version") in (None, "", "unknown")
+                or evidence.get("tool_version") in (None, "", "unknown")
                 or (name == "injected_failure" and not evidence["error_output_summary"].strip())):
             return "待確認"
     return "通過"
@@ -348,6 +350,18 @@ def validate_release_output(output_dir, run_root) -> list[Finding]:
     if len(documents) != 3:
         return _summary(findings)
     metadata = documents["lifecycle_metadata.json"]
+    # CLI LocalDB validation writes a separate immutable lifecycle artifact.
+    # Load it as a read-only handoff when metadata was created earlier.
+    if "localdb_validation" not in metadata:
+        localdb_path = run / "localdb_validation.json"
+        if localdb_path.is_file() and not localdb_path.is_symlink():
+            try:
+                localdb = json.loads(localdb_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                localdb = None
+            if isinstance(localdb, dict) and localdb.get("schema_version") == 1:
+                metadata = dict(metadata)
+                metadata["localdb_validation"] = localdb
     source = documents["source_unit_metadata.json"]
     exclusions = documents["lifecycle_exclusion_manifest.json"].get("exclusions")
     valid = isinstance(exclusions, list)

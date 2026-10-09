@@ -71,6 +71,7 @@ def test_four_rounds_use_fresh_sessions_and_expected_transaction_contract(tmp_pa
         baseline_source=str(baseline), fixture_source=str(fixture),
         executor=executor, command=["sqlcmd", "-S", "(localdb)\\MSSQLLocalDB"],
         adapter_provenance="fake-disposable-adapter/1",
+        provider_version="sqlcmd-localdb/1", tool_version="mssql/1",
     )
     assert result["status"] == "passed"
     assert len(calls) == 4
@@ -98,7 +99,8 @@ def test_executor_failure_is_structured_and_never_claims_pass(tmp_path):
 
     result = module.run_local_validation(artifact, server="(localdb)\\MSSQLLocalDB", database="test",
                                          baseline_source=str(baseline), fixture_source=str(fixture),
-                                         adapter_provenance="fake/1", executor=executor)
+                                         adapter_provenance="fake/1", provider_version="sqlcmd/1",
+                                         tool_version="mssql/1", executor=executor)
     assert result["status"] == "failed"
     assert result["rounds"]["validate_only"]["exit_code"] == 1
     assert "SQL ERROR_NUMBER" in result["rounds"]["validate_only"]["error_output_summary"]
@@ -133,3 +135,17 @@ def test_evidence_can_be_written_inside_lifecycle_only(tmp_path):
         assert "lifecycle" in str(exc)
     else:
         raise AssertionError("operator evidence path must be rejected")
+
+
+def test_success_cleanup_removes_only_temporary_material(tmp_path):
+    lifecycle_spec = importlib.util.spec_from_file_location(
+        "lifecycle_store_cleanup", ROOT / "skills/release-docs/scripts/lifecycle_store.py")
+    lifecycle = importlib.util.module_from_spec(lifecycle_spec)
+    lifecycle_spec.loader.exec_module(lifecycle)
+    run = tmp_path / ".release-docs" / "runs" / "run-cleanup"
+    (run / "temporary").mkdir(parents=True)
+    (run / "temporary" / "sqlcmd.log").write_text("trace", encoding="utf-8")
+    (run / "lifecycle_metadata.json").write_text("audit", encoding="utf-8")
+    assert lifecycle.cleanup_lifecycle_run(run, outcome="success") is True
+    assert (run / "lifecycle_metadata.json").exists()
+    assert not (run / "temporary").exists()

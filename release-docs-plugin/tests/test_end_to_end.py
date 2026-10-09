@@ -64,15 +64,14 @@ def test_collection_to_review_preserves_allowlist_and_localdb_evidence(tmp_path)
         artifact.path, server="(localdb)\\MSSQLLocalDB", database="e2e_release",
         baseline_source=str(baseline), fixture_source=str(fixture),
         adapter_provenance="fixture-disposable-adapter/1",
+        provider_version="fixture-sqlcmd/1", tool_version="fixture-mssql/1",
         command=["fixture-adapter", "--fresh-session"], executor=executor)
     assert localdb["status"] == "passed"
     run = tmp_path / ".release-docs/runs/e2e"
-    manifest = write_lifecycle_run(run, analysis, localdb_validation=localdb)
-    metadata_path = run / "lifecycle_metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata.update({"operator_contract": {"parameters_applicable": False},
-                     "execution_artifact": {"path": str(artifact.path), "sha256": artifact.sha256}})
-    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    manifest = write_lifecycle_run(
+        run, analysis, localdb_validation=localdb,
+        operator_contract={"parameters_applicable": False},
+        execution_artifact={"path": str(artifact.path), "sha256": artifact.sha256})
     output = tmp_path / "operator"
     render_release_documents(analysis, artifact, manifest, output)
     assert {p.name for p in output.iterdir()} == {"00_上線指引.md", "01_部署SQL.sql"}
