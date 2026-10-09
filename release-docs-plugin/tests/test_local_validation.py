@@ -146,6 +146,7 @@ def test_success_cleanup_removes_only_temporary_material(tmp_path):
     (run / "temporary").mkdir(parents=True)
     (run / "temporary" / "sqlcmd.log").write_text("trace", encoding="utf-8")
     (run / "lifecycle_metadata.json").write_text("audit", encoding="utf-8")
-    assert lifecycle.cleanup_lifecycle_run(run, outcome="success") is True
+    assert lifecycle.finalize_lifecycle_run(
+        run, review_status="success", delivery_status="success") is True
     assert (run / "lifecycle_metadata.json").exists()
     assert not (run / "temporary").exists()

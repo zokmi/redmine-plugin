@@ -101,6 +101,13 @@ def cleanup_lifecycle_run(run_root, *, outcome):
     return removed
 
 
+def finalize_lifecycle_run(run_root, *, review_status, delivery_status):
+    """Finalize after review and delivery, then clean owned temp material."""
+    if review_status != "success" or delivery_status != "success":
+        return False
+    return cleanup_lifecycle_run(run_root, outcome="success")
+
+
 def sweep_expired_lifecycle_runs(lifecycle_root, *, now=None, retention_days=7):
     """Remove only expired failed/temporary lifecycle runs under ``runs``."""
     base = Path(lifecycle_root).absolute()

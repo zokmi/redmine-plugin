@@ -15,6 +15,8 @@ description: 當使用者要先確認 Git 差異範圍，再以舊版資料庫�
 python SCRIPT_DIR/collect_release_evidence.py --repo PATH --base REV --target REV --diff-mode direct
 ```
 
+完成審查與交付後才呼叫 `finalize_lifecycle_run(run_root, review_status="success", delivery_status="success")`；它只清除該 run 下的暫存目錄，保留 manifest、審查報告與 execution evidence。每次新 run 建立時會先掃描並清除已到期的暫存資料。
+
 選擇 `merge-base` 時以共同祖先作為實際比較起點。讀取 JSON 的完整 SHA、Git 根目錄與 A/M/D/R 等路徑證據；將 staged、unstaged、untracked 與 committed changes 分開。工具不輸出內容，後續 source 分析必須再取得對應 revision 的來源，不可從檔名或 commit 標題猜測 SQL。
 
 ## 產製與審查邊界
