@@ -35,18 +35,18 @@ python SCRIPT_DIR/collect_release_evidence.py --repo PATH --base REV --target RE
 
 ```python
 analysis = analyze_release_units(repo, evidence, baseline_schema, exclusion_intent)
-manifest_path = write_lifecycle_run(
-    run_root, analysis,
-    localdb_validation=localdb_evidence,
-    execution_artifact={"path": str(artifact.path), "sha256": artifact.sha256},
-    operator_contract={"parameters_applicable": bool(analysis.parameter_changes)},
-)
 # 不將排除單位交給 assembler；manifest 是排除真相。
 excluded_ids = {uid for exclusion in analysis.exclusions for uid in exclusion["unit_ids"]}
 included_units = [unit for unit in analysis.units if unit["unit_id"] not in excluded_ids]
 artifact = assemble_deployment_sql(included_units, staging_dir / "01_部署SQL.sql", {
     "validate_only": 1, "release_id": release_id,
 })
+manifest_path = write_lifecycle_run(
+    run_root, analysis,
+    localdb_validation=localdb_evidence,
+    execution_artifact={"path": str(artifact.path), "sha256": artifact.sha256},
+    operator_contract={"parameters_applicable": bool(getattr(analysis, "parameter_changes", []))},
+)
 inventory = render_release_documents(analysis, artifact, manifest_path, output_dir)
 ```
 

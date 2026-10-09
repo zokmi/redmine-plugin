@@ -54,8 +54,10 @@ def write_lifecycle_run(run_root, analysis_result, localdb_validation=None,
             raise ValueError("Lifecycle evidence is immutable; create a new run")
     root.mkdir(parents=True, exist_ok=True)
     ignore = root.parent.parent / ".gitignore"
-    if not ignore.exists():
-        ignore.write_text("runs/\n", encoding="utf-8")
+    existing_ignore = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+    if "runs/" not in {line.strip() for line in existing_ignore.splitlines()}:
+        suffix = "" if not existing_ignore or existing_ignore.endswith("\n") else "\n"
+        ignore.write_text(existing_ignore + suffix + "runs/\n", encoding="utf-8")
     for name, data in encoded.items():
         destination = root / name
         if not destination.exists():
@@ -99,10 +101,17 @@ def sweep_expired_lifecycle_runs(lifecycle_root, *, now=None, retention_days=7):
     runs = base / "runs"
     if base.name != ".release-docs" or runs.is_symlink() or not runs.is_dir():
         raise ValueError("Lifecycle root must contain a regular runs directory")
+    if any(p.is_symlink() or (p.exists() and p.is_junction()) for p in (base, *base.parents)):
+        raise ValueError("Linked lifecycle paths are not permitted")
     cutoff = (now.timestamp() if now is not None else __import__("time").time()) - retention_days * 86400
     removed = []
     for child in runs.iterdir():
-        if child.is_dir() and not child.is_symlink() and child.stat().st_mtime <= cutoff:
-            shutil.rmtree(child)
+        if not child.is_dir() or child.is_symlink() or child.stat().st_mtime > cutoff:
+            continue
+        # Permanent manifests and review records are never swept. Only an
+        # explicitly owned temporary directory can expire.
+        temporary = child / "temporary"
+        if temporary.is_dir() and not temporary.is_symlink():
+            shutil.rmtree(temporary)
             removed.append(child.name)
     return removed
