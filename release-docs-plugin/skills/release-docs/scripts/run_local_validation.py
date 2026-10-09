@@ -131,6 +131,8 @@ def run_local_validation(
                 evidence["tool_version"] = raw["tool_version"]
             if "command" in raw:
                 evidence["command"] = raw["command"]
+            if evidence.get("provider_version") in (None, "", "unknown") or evidence.get("tool_version") in (None, "", "unknown"):
+                failures.append(f"{name}:version_evidence")
             if evidence["status"] != "passed" or evidence["exit_code"] != 0:
                 failures.append(name)
             if not isinstance(evidence["checks"], (list, dict)) or not evidence["checks"]:

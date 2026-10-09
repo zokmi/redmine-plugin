@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import os
 import re
+import shutil
 
 
 def write_lifecycle_run(run_root, analysis_result, localdb_validation=None,
@@ -52,6 +53,9 @@ def write_lifecycle_run(run_root, analysis_result, localdb_validation=None,
         if destination.exists() and destination.read_bytes() != data:
             raise ValueError("Lifecycle evidence is immutable; create a new run")
     root.mkdir(parents=True, exist_ok=True)
+    ignore = root.parent.parent / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text("runs/\n", encoding="utf-8")
     for name, data in encoded.items():
         destination = root / name
         if not destination.exists():
@@ -74,6 +78,8 @@ def cleanup_lifecycle_run(run_root, *, outcome):
     if (root.parent.name != "runs" or root.parent.parent.name != ".release-docs"
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", root.name)):
         raise ValueError("Run must be inside lifecycle .release-docs/runs/<run-id>")
+    if any(p.is_symlink() or (p.exists() and p.is_junction()) for p in (root, *root.parents)):
+        raise ValueError("Linked lifecycle paths are not permitted")
     if outcome != "success":
         return False
     if not root.exists():
@@ -82,9 +88,21 @@ def cleanup_lifecycle_run(run_root, *, outcome):
     for name in ("temporary", ".tmp"):
         child = root / name
         if child.is_dir() and not child.is_symlink():
-            for nested in child.rglob("*"):
-                if nested.is_file() and not nested.is_symlink():
-                    nested.unlink()
-            child.rmdir()
+            shutil.rmtree(child)
             removed = True
+    return removed
+
+
+def sweep_expired_lifecycle_runs(lifecycle_root, *, now=None, retention_days=7):
+    """Remove only expired failed/temporary lifecycle runs under ``runs``."""
+    base = Path(lifecycle_root).absolute()
+    runs = base / "runs"
+    if base.name != ".release-docs" or runs.is_symlink() or not runs.is_dir():
+        raise ValueError("Lifecycle root must contain a regular runs directory")
+    cutoff = (now.timestamp() if now is not None else __import__("time").time()) - retention_days * 86400
+    removed = []
+    for child in runs.iterdir():
+        if child.is_dir() and not child.is_symlink() and child.stat().st_mtime <= cutoff:
+            shutil.rmtree(child)
+            removed.append(child.name)
     return removed

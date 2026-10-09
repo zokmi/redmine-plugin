@@ -156,6 +156,8 @@ def _status(metadata, artifact):
                     isinstance(rounds.get(name), dict) and rounds[name].get("status") == "passed"
                     and type(rounds[name].get("exit_code")) is int and rounds[name]["exit_code"] == 0
                     and isinstance(rounds[name].get("error_output_summary"), str)
+                    and rounds[name].get("provider_version") not in ("unknown", "")
+                    and rounds[name].get("tool_version") not in ("unknown", "")
                     and (name != "injected_failure" or bool(rounds[name]["error_output_summary"].strip()))
                     and all(rounds[name].get(k) for k in fields)
                     for name in ("validate_only", "commit", "rerun", "injected_failure")):

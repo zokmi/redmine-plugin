@@ -25,7 +25,7 @@ python SCRIPT_DIR/collect_release_evidence.py --repo PATH --base REV --target RE
 
 上板檔案固定為 `00_上線指引.md`、唯一人工 SQL `01_部署SQL.sql`，以及有參數異動時的 `02_參數異動.md`。source、工具輸出、完整 mapping 與排除真相 `lifecycle_exclusion_manifest.json` 保存在 `.release-docs/runs/<run-id>/`，不得交給上板人員操作、不得放入 release 目錄或版控，也不得寫入 `docs/release-artifacts`。`00` 的排除摘要由 lifecycle 真相投影，不反向改寫排除範圍。
 
-單一 release-level transaction 必須完整執行與驗證後，在 ValidateOnly=1 rollback，在 ValidateOnly=0 從 fresh session 重新執行後 commit。任何錯誤 rollback、THROW 並停止；不可交易 DDL 需受控分類，不能宣稱外層 transaction 可回復。不得直接連線或修改正式資料庫。
+單一 release-level transaction 必須完整執行與驗證後，在 ValidateOnly=1 rollback，在 ValidateOnly=0 從 fresh baseline／fresh session 重新執行後 commit；rerun 使用已 commit 的資料庫，以 fresh session 驗證收斂，不重置 baseline。任何錯誤 rollback、THROW 並停止；不可交易 DDL 需受控分類，不能宣稱外層 transaction 可回復。不得直接連線或修改正式資料庫。
 
 分開回報 SQL 內容審核與部署驗證狀態。證據不足用「待確認」，不得以文件存在或 Git 收集成功代替 SQL／部署驗證。
 
@@ -35,7 +35,12 @@ python SCRIPT_DIR/collect_release_evidence.py --repo PATH --base REV --target RE
 
 ```python
 analysis = analyze_release_units(repo, evidence, baseline_schema, exclusion_intent)
-manifest_path = write_lifecycle_run(run_root, analysis)
+manifest_path = write_lifecycle_run(
+    run_root, analysis,
+    localdb_validation=localdb_evidence,
+    execution_artifact={"path": str(artifact.path), "sha256": artifact.sha256},
+    operator_contract={"parameters_applicable": bool(analysis.parameter_changes)},
+)
 # 不將排除單位交給 assembler；manifest 是排除真相。
 excluded_ids = {uid for exclusion in analysis.exclusions for uid in exclusion["unit_ids"]}
 included_units = [unit for unit in analysis.units if unit["unit_id"] not in excluded_ids]
