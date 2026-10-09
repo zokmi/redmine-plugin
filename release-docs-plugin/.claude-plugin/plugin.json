@@ -1,0 +1,8 @@
+{
+  "name": "release-docs",
+  "version": "0.1.0",
+  "description": "依 Git 與資料庫來源證據產製、驗證及審核上線文件。",
+  "author": {"name": "Kenny Zheng"},
+  "license": "MIT",
+  "skills": "./skills/"
+}

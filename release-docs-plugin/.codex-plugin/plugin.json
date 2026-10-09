@@ -1,0 +1,16 @@
+{
+  "name": "release-docs",
+  "version": "0.1.0",
+  "description": "依 Git 與資料庫來源證據產製、驗證及審核上線文件。",
+  "author": {"name": "Kenny Zheng"},
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Release Docs",
+    "shortDescription": "蒐集版更證據與產製上線文件",
+    "developerName": "Kenny Zheng",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": "先確認 Git 差異範圍、舊版資料庫來源、release 識別與排除意圖；以可追溯證據產製與審核上線文件。"
+  }
+}
