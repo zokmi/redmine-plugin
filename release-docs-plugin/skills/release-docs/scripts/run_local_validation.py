@@ -101,7 +101,13 @@ def run_local_validation(
         # A fresh baseline/session is an explicit contract, not an implied retry.
         evidence["baseline_usage"] = f"fresh disposable baseline/session #{index + 1}"
         evidence["fixture_usage"] = "loaded into disposable LocalDB"
-        fresh_baseline_source = f"{baseline_source}#fresh={index + 1}"
+        if name == "rerun":
+            # Convergence must exercise the committed database from the prior
+            # round in a fresh session; resetting its baseline would hide rerun
+            # defects instead of detecting them.
+            fresh_baseline_source = f"{baseline_source}#committed-from=commit#session={index + 1}"
+        else:
+            fresh_baseline_source = f"{baseline_source}#fresh={index + 1}"
         try:
             raw = executor(
                 sql=sql, artifact_path=str(artifact), round_name=name,

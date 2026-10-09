@@ -78,7 +78,8 @@ def test_four_rounds_use_fresh_sessions_and_expected_transaction_contract(tmp_pa
     assert all(c["fresh_session"] is True for c in calls)
     assert calls[0]["validate_only"] is True and calls[1]["validate_only"] is False
     assert calls[3]["inject_failure"] is True
-    assert len({c["baseline_source"] for c in calls}) == 4
+    assert len({c["baseline_source"] for c in calls if c["round_name"] != "rerun"}) == 3
+    assert "committed-from=commit" in calls[2]["baseline_source"]
     assert all(r["provider_version"] and r["tool_version"] for r in result["rounds"].values())
     assert all(r["baseline_sha256"] and r["fixture_sha256"] for r in result["rounds"].values())
 
