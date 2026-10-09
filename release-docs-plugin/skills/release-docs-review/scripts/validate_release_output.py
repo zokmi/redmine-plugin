@@ -37,7 +37,7 @@ unit_transaction_control reserved_context_mutation implicit_transactions_enabled
 execution_disabled malformed_sql_lexeme silent_catch raiserror_without_throw missing_xact_abort
 missing_try_catch transaction_count missing_implicit_transactions_off unconditional_transaction_start
 validate_only_rollback deploy_commit missing_throw transaction_scope error_rollback missing_error_context
-missing_transaction_action unmapped_sql
+missing_transaction_action unmapped_sql invalid_exclusion_provenance
 """.split())
 
 
@@ -156,8 +156,72 @@ def _unmapped_sql(sql):
     return malformed or bool(code.strip())
 
 
+def _exclusion_provenance(source_units, evidence, exclusions):
+    """Resolve full Task 2 exclusions against authoritative lifecycle records."""
+    if not exclusions:
+        return []
+    by_id = {u["unit_id"]: u for u in source_units}
+    sources = evidence.get("sources")
+    if len(by_id) != len(source_units) or not isinstance(sources, list):
+        return [_finding("invalid_exclusion_provenance")]
+    unit_fields = ("unit_id", "phase", "complete", "depends_on", "issues", "objects", "source_path",
+                   "source_revision", "source_hash", "source_line", "sql_hash", "covered_sources")
+    provenance_fields = ("unit_id", "source_path", "source_revision", "source_hash")
+    all_excluded = set()
+    for exclusion in exclusions:
+        ids = set(exclusion["unit_ids"])
+        records, artifacts = exclusion.get("units"), exclusion.get("evidence")
+        impact = exclusion.get("dependency_impact")
+        valid = (ids <= set(by_id) and not ids & all_excluded
+                 and isinstance(records, list) and len(records) == len(ids)
+                 and isinstance(artifacts, list) and len(artifacts) == len(ids)
+                 and isinstance(impact, list) and all(isinstance(uid, str) for uid in impact)
+                 and all(isinstance(exclusion.get(k), str) and exclusion[k].strip()
+                         for k in ("exclusion_id", "authorization_status", "review_status")))
+        if not valid:
+            return [_finding("invalid_exclusion_provenance")]
+        all_excluded.update(ids)
+        for collection in (records, artifacts):
+            if (any(not isinstance(item, dict) or not isinstance(item.get("unit_id"), str) for item in collection)
+                    or {item["unit_id"] for item in collection} != ids):
+                return [_finding("invalid_exclusion_provenance")]
+        for record in records:
+            unit = by_id[record["unit_id"]]
+            if (any(key not in unit or key not in record or record[key] != unit[key] for key in unit_fields)
+                    or not isinstance(unit["source_path"], str) or not unit["source_path"]
+                    or not isinstance(unit["source_revision"], str)
+                    or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", unit["source_revision"])
+                    or any(not isinstance(unit[k], str) or not re.fullmatch(r"[0-9a-fA-F]{64}", unit[k])
+                           for k in ("source_hash", "sql_hash"))
+                    or any(not isinstance(unit[k], list) or any(not isinstance(v, str) for v in unit[k])
+                           for k in ("objects", "issues", "covered_sources"))):
+                return [_finding("invalid_exclusion_provenance")]
+            if not any(isinstance(item, dict) and all(item.get(k) == unit[k] for k in provenance_fields[1:])
+                       for item in sources):
+                return [_finding("invalid_exclusion_provenance")]
+        if any(any(item.get(k) != by_id[item["unit_id"]].get(k) for k in provenance_fields) for item in artifacts):
+            return [_finding("invalid_exclusion_provenance")]
+        if (set(exclusion["objects"]) != {obj for uid in ids for obj in by_id[uid]["objects"]}
+                or set(exclusion["issues"]) != {issue for uid in ids for issue in by_id[uid]["issues"]}):
+            return [_finding("invalid_exclusion_provenance")]
+        affected = set(ids)
+        while True:
+            expanded = affected | {u["unit_id"] for u in source_units if set(u["depends_on"]) & affected}
+            if expanded == affected:
+                break
+            affected = expanded
+        if set(impact) != affected - ids:
+            return [_finding("invalid_exclusion_provenance")]
+    return []
+
+
 def _units(sql, evidence, exclusions):
     findings = []
+    source_findings = evidence.get("findings")
+    if (not isinstance(source_findings, list)
+            or any(not isinstance(f, dict) or not isinstance(f.get("code"), str) or not f["code"].strip()
+                   or type(f.get("blocking")) is not bool for f in source_findings)):
+        return [_finding("invalid_unit_evidence")]
     source_units = evidence.get("units")
     if not isinstance(source_units, list) or any(not isinstance(u, dict) for u in source_units):
         return [_finding("invalid_unit_evidence")]
@@ -170,10 +234,11 @@ def _units(sql, evidence, exclusions):
                 or type(unit.get("source_line")) is not int or unit["source_line"] < 1):
             return [_finding("invalid_unit_evidence")]
     excluded = {uid for item in exclusions for uid in item["unit_ids"]}
+    findings.extend(_exclusion_provenance(source_units, evidence, exclusions))
     expected = {u.get("unit_id"): u for u in source_units if u.get("unit_id") not in excluded}
     if len(expected) != len([u for u in source_units if u.get("unit_id") not in excluded]) or None in expected:
         findings.append(_finding("invalid_unit_evidence"))
-    if any(f.get("blocking") for f in evidence.get("findings", []) if isinstance(f, dict)):
+    if any(f["blocking"] for f in source_findings):
         findings.append(_finding("blocking_source_analysis"))
     for unit in expected.values():
         dependencies = unit.get("depends_on")
@@ -352,13 +417,32 @@ def validate_release_output(output_dir, run_root) -> list[Finding]:
     return _summary(findings, deployment)
 
 
+def _report_status(findings, domain, summary_code):
+    """Never upgrade any prior summary or hide a later semantic finding."""
+    rank = {value: index for index, value in enumerate(STATUSES)}
+    summaries = [f.get("status") if f.get("status") in STATUSES else "待確認"
+                 for f in findings if isinstance(f, dict) and f.get("code") == summary_code]
+    status = max(summaries or ["待確認"], key=rank.get)
+    for finding in findings:
+        if not isinstance(finding, dict) or finding.get("code") in ("sql_content_status", "deployment_validation_status"):
+            continue
+        code = finding.get("code")
+        finding_domain = "sql_content" if code in ("semantic_sql_defect", "semantic_review_pending") else finding.get("domain", "sql_content")
+        if finding_domain != domain:
+            continue
+        candidate = "未通過" if finding.get("blocking") is True or code == "semantic_sql_defect" else finding.get("status", "待確認")
+        if candidate not in STATUSES or code == "semantic_review_pending" and candidate == "通過":
+            candidate = "待確認"
+        status = max((status, candidate), key=rank.get)
+    return status
+
+
 def write_review_report(run_root, findings, fingerprint):
     """Write review evidence only in lifecycle; include codes, never source prose."""
     run = lifecycle_root(run_root)
     report = plain_path(run / "05_版更審查報告.md")
-    statuses = {f.get("code"): f.get("status") for f in findings if isinstance(f, dict)}
-    values = {"SQLSTATUS": statuses.get("sql_content_status", "待確認"),
-              "DEPLOYSTATUS": statuses.get("deployment_validation_status", "待確認"),
+    values = {"SQLSTATUS": _report_status(findings, "sql_content", "sql_content_status"),
+              "DEPLOYSTATUS": _report_status(findings, "deployment_validation", "deployment_validation_status"),
               "FINGERPRINT": fingerprint.sha256, "FINDINGS": ""}
     for key in ("SQLSTATUS", "DEPLOYSTATUS"):
         if values[key] not in STATUSES:

@@ -16,12 +16,12 @@ description: Use when release-docs 已產出必要版更文件，需要必要語
 ## 執行順序
 
 1. 呼叫 `scripts/validate_release_output.py --output-dir <operator> --run-root <run>`。工具回傳 `list[Finding]`，最後兩筆的 code 為 `sql_content_status` 與 `deployment_validation_status`，status 僅有 `通過`／`待確認`／`未通過`。CLI 有 blocking finding 時以 exit 1 結束；exit 0 仍可能待確認。
-2. 比對 lifecycle → `01` → `00` 排除摘要。核對完整 included/excluded unit、來源 revision/hash、相依順序、SCHEMA／REPAIR／DATA／VALIDATION 區段，以及 excluded object 沒有 DROP、DELETE 或欄位補建。`00` 只能是 manifest 的操作投影，不得新增排除範圍。
+2. 比對 lifecycle → `01` → `00` 排除摘要。核對完整 included/excluded unit、來源 revision/hash、相依順序、SCHEMA／REPAIR／DATA／VALIDATION 區段，以及 excluded object 沒有 DROP、DELETE 或欄位補建。每個 excluded ID 必須能解析到 source unit；manifest 的完整 units、source evidence、object/issue 範圍與 dependency impact 必須與 source metadata 一致，缺 provenance 或未知 ID 即阻擋。`00` 只能是 manifest 的操作投影，不得新增排除範圍。
 3. 審閱 authoritative source 與 execution artifact，逐一核對完整 table/column/index/FK/constraint/extended property 定義、constraint trust、資料前置條件與保留資料。確認已存在且正確時跳過、缺少時補建、不相容時停止；不能只比名稱、history 或 table 是否存在。工具對未受 guard 保護的 mutation 與重複欄位會阻擋，但靜態 guard 不證明安全重跑。語意證據不足時將 SQL 狀態降為待確認；確認資料／SQL 缺陷時未通過。
 4. 核對單一 release transaction、XACT_ABORT、TRY/CATCH、ValidateOnly=1 完整 rollback、ValidateOnly=0 fresh session commit、ROLLBACK＋THROW 停止後續 unit。核對結構化 ReleaseId、database/server、phase/unit、source location、ERROR_*、XACT_STATE、@@TRANCOUNT 與 transaction action。GO、獨立 COMMIT、不可交易 DDL、吞錯或僅 RAISERROR 都阻擋。
 5. LocalDB 以四輪同 artifact evidence 獨立判定部署狀態；缺證據維持待確認，失敗是未通過，只有明確證明 SQL 缺陷的 evidence 才連動 SQL 狀態。不得把靜態通過說成部署通過，也不得以隔離結果取代正式 provider、版本、權限、備份與維護窗口確認。
 6. 呼叫 `review_fingerprint(repo, output_dir, run_root, source_scope)`，重新計算 `00`、`01`、適用時 `02`、manifest、source/unit metadata、lifecycle metadata、source revision/tree IDs、declared database source worktree hash 與 execution artifact hash。fingerprint 只回傳摘要，不讀取 repository secret/configuration 原值。不得用 HEAD 取代指定 source revision。任何覆蓋異動都使舊報告失效。
-7. 合併工具 finding 與來源語意審閱結果，呼叫 `write_review_report(run_root, findings, fingerprint)` 寫入 lifecycle 的 `05_版更審查報告.md`。語意審查可用 `semantic_review_pending` 或 `semantic_sql_defect` finding 降低 SQL 狀態。對外只提供狀態、缺失與需修正來源；不貼 SQL literal、連線字串、密碼、token 或原始工具錯誤值。
+7. 合併工具 finding 與來源語意審閱結果，呼叫 `write_review_report(run_root, findings, fingerprint)` 寫入 lifecycle 的 `05_版更審查報告.md`。語意審查可用 `semantic_review_pending` 或 `semantic_sql_defect` finding 降低 SQL 狀態；writer 會以最嚴重既有 summary 與完整合併 finding 重算狀態，不保留過時的通過，也不將 SQL 缺陷變成部署證據失敗。對外只提供狀態、缺失與需修正來源；不貼 SQL literal、連線字串、密碼、token 或原始工具錯誤值。
 
 ## Lifecycle evidence 介面
 

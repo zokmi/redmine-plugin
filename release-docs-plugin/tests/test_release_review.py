@@ -31,7 +31,7 @@ def git(repo, *args):
 
 @pytest.fixture
 def release(tmp_path):
-    from analyze_release_units import AnalysisResult
+    from analyze_release_units import analyze_release_units
     from assemble_deployment_sql import assemble_deployment_sql
     from lifecycle_store import write_lifecycle_run
     from render_release_documents import render_release_documents
@@ -43,26 +43,29 @@ def release(tmp_path):
     git(repo, "config", "user.email", "fixture@example.invalid")
     git(repo, "config", "core.autocrlf", "false")
     sql = "IF OBJECT_ID(N'dbo.Customer', N'U') IS NULL\nBEGIN\nCREATE TABLE dbo.Customer (Id int);\nEND;\n"
-    (repo / "customer.sql").write_text(sql, encoding="utf-8")
+    (repo / "customer.sql").write_bytes(sql.encode("utf-8"))
+    (repo / "core.sql").write_bytes(b"INSERT INTO dbo.Core VALUES (1);\n")
     (repo / ".env").write_text("PASSWORD=NEVER_READ_SECRET", encoding="utf-8")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "fixture")
     revision = git(repo, "rev-parse", "HEAD")
     scope = {"base_sha": revision, "target_sha": revision}
-    unit = {"unit_id": "customer", "phase": "SCHEMA", "complete": True,
-            "source_path": "customer.sql", "source_revision": revision,
-            "source_hash": hashlib.sha256(sql.encode()).hexdigest(),
-            "sql_hash": hashlib.sha256(sql.encode()).hexdigest(), "source_line": 1,
-            "objects": ["dbo.Customer"], "issues": [], "depends_on": [], "sql": sql}
-    exclusion = {"exclusion_id": "exclude-5005", "issues": ["#5005"], "unit_ids": ["core"],
-                 "objects": ["dbo.Core"], "reason": "本次排除核心 DB",
-                 "operator_action": "保留 dbo.Core 既有物件", "dependency_impact": [],
-                 "reinstatement_conditions": ["完整單位重新授權與審查"]}
-    analysis = AnalysisResult(units=[unit], exclusions=[exclusion], sources=[{k: unit[k] for k in
-                              ("source_path", "source_revision", "source_hash")}], source_scope=scope)
+    baseline = repo / "old.sql"
+    baseline.write_bytes(b"CREATE TABLE dbo.Existing (Id int);\n")
+    evidence = {**scope, "committed_changes": [{"path": "customer.sql", "status": "A"},
+                                               {"path": "core.sql", "status": "A"}],
+                "execution_units": [
+                    {"unit_id": "customer", "phase": "SCHEMA", "complete": True,
+                     "source_path": "customer.sql", "objects": ["dbo.Customer"], "issues": [], "depends_on": []},
+                    {"unit_id": "core", "phase": "DATA", "complete": True,
+                     "source_path": "core.sql", "objects": ["dbo.Core"], "issues": ["#5005"], "depends_on": []}]}
+    analysis = analyze_release_units(repo, evidence, baseline, "#5005")
+    assert not analysis.blocked
     run = tmp_path / ".release-docs/runs/review-1"
     manifest = write_lifecycle_run(run, analysis)
-    artifact = assemble_deployment_sql(analysis.units, run / "assembly/01_部署SQL.sql", 1)
+    excluded = {uid for item in analysis.exclusions for uid in item["unit_ids"]}
+    artifact = assemble_deployment_sql([u for u in analysis.units if u["unit_id"] not in excluded],
+                                       run / "assembly/01_部署SQL.sql", 1)
     output = tmp_path / "operator"
     render_release_documents(analysis, artifact, manifest, output)
     metadata = json.loads((run / "lifecycle_metadata.json").read_text())
@@ -417,3 +420,82 @@ def test_malformed_unit_mapping_returns_finding_instead_of_crashing(release):
     sql = sql.replace('"depends_on": []', '"depends_on": [[]]')
     replace_sql(release, sql)
     assert "invalid_unit_mapping" in codes(release)
+
+
+@pytest.mark.parametrize("code, blocking, expected", [
+    ("semantic_sql_defect", True, "未通過"),
+    ("semantic_sql_defect", False, "未通過"),
+    ("semantic_review_pending", False, "待確認"),
+    ("duplicate_column", True, "未通過"),
+])
+def test_report_merges_sql_findings_instead_of_preserving_a_stale_pass(release, code, blocking, expected):
+    module = api()
+    merged = findings(release) + [{"code": code, "blocking": blocking, "domain": "sql_content"}]
+    report = module.write_review_report(release[2], merged, api("review_fingerprint").review_fingerprint(*release))
+    text = report.read_text(encoding="utf-8")
+    assert "SQL 內容審核：" + expected in text
+    assert "SQL 內容審核：通過" not in text
+    assert "部署驗證：待確認" in text
+
+
+def test_report_preserves_worst_summary_when_later_summary_claims_pass(release):
+    merged = findings(release) + [{"code": "sql_content_status", "status": "未通過", "domain": "sql_content", "blocking": True},
+                                 {"code": "sql_content_status", "status": "通過", "domain": "sql_content", "blocking": False}]
+    report = api().write_review_report(release[2], merged, api("review_fingerprint").review_fingerprint(*release))
+    assert "SQL 內容審核：未通過" in report.read_text(encoding="utf-8")
+
+
+def test_report_merging_sql_defect_preserves_successful_deployment_evidence(release):
+    update_metadata(release, localdb_validation=localdb_evidence(release))
+    merged = findings(release) + [{"code": "semantic_sql_defect", "blocking": True, "domain": "sql_content"}]
+    report = api().write_review_report(release[2], merged, api("review_fingerprint").review_fingerprint(*release))
+    text = report.read_text(encoding="utf-8")
+    assert "SQL 內容審核：未通過" in text
+    assert "部署驗證：通過" in text
+
+
+@pytest.mark.parametrize("damage", ["unknown_id", "missing_units", "missing_evidence", "wrong_hash",
+                                    "wrong_revision", "wrong_objects", "wrong_issues", "wrong_dependency",
+                                    "wrong_evidence", "missing_impact", "missing_source_unit"])
+def test_exclusion_requires_complete_matching_task2_source_provenance(release, damage):
+    path = release[2] / "lifecycle_exclusion_manifest.json"
+    manifest = json.loads(path.read_text())
+    exclusion = manifest["exclusions"][0]
+    if damage == "unknown_id":
+        exclusion["unit_ids"] = ["nonexistent_unit"]
+    elif damage == "missing_units":
+        del exclusion["units"]
+    elif damage == "missing_evidence":
+        del exclusion["evidence"]
+    elif damage == "missing_impact":
+        del exclusion["dependency_impact"]
+    elif damage == "missing_source_unit":
+        source_path = release[2] / "source_unit_metadata.json"
+        source = json.loads(source_path.read_text())
+        source["units"] = [u for u in source["units"] if u["unit_id"] != "core"]
+        write_json(source_path, source)
+    elif damage == "wrong_evidence":
+        exclusion["evidence"][0]["source_hash"] = "0" * 64
+    else:
+        fields = {"wrong_hash": ("source_hash", "0" * 64), "wrong_revision": ("source_revision", "0" * 40),
+                  "wrong_objects": ("objects", ["dbo.Other"]), "wrong_issues": ("issues", ["#9999"]),
+                  "wrong_dependency": ("depends_on", ["customer"])}
+        key, value = fields[damage]
+        exclusion["units"][0][key] = value
+    write_json(path, manifest)
+    result = findings(release)
+    assert any(f["code"] == "invalid_exclusion_provenance" and f["blocking"] for f in result)
+    assert status(release, "sql_content_status") == "未通過"
+
+
+@pytest.mark.parametrize("value", [None, {}, "RAW_SECRET", [None], ["RAW_SECRET"], [{}],
+                                    [{"code": "unsafe", "blocking": "false"}]])
+def test_malformed_source_findings_returns_safe_blocking_finding(release, value):
+    path = release[2] / "source_unit_metadata.json"
+    source = json.loads(path.read_text())
+    source["findings"] = value
+    write_json(path, source)
+    result = findings(release)
+    assert any(f["code"] == "invalid_unit_evidence" and f["blocking"] for f in result)
+    assert status(release, "sql_content_status") == "未通過"
+    assert "RAW_SECRET" not in repr(result)
