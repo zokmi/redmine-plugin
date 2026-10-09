@@ -39,3 +39,22 @@ pytest ./tests/test_collect_release_evidence.py -q
 ```
 
 測試使用隔離本機 repository，不連線或修改正式資料庫。Git metadata 驗證與 SQL 內容審核、部署驗證是不同狀態。
+
+### LocalDB 四輪驗證
+
+LocalDB 驗證是選用的隔離步驟。以 `run_local_validation.py` 執行時必須指定
+`(localdb)` server 與 disposable database；沒有注入 LocalDB executor 時會產生
+`status=not_run` 及原因，不能當作部署通過。runner 不接受 production server，亦不
+保存連線密碼。
+
+提供 executor 後，runner 會以四個新 session／新 baseline 依序執行：
+
+1. `validate_only`：完整 SQL、查核後 rollback。
+2. `commit`：獨立 fresh baseline 與 session，完整 SQL、查核後 commit。
+3. `rerun`：再次確認收斂與冪等性。
+4. `injected_failure`：注入錯誤，確認 rollback、`THROW` 與後續 unit 未執行。
+
+證據寫入 `.release-docs/runs/<run-id>/localdb_validation.json`，交付目錄仍只含
+`00_上線指引.md`、`01_部署SQL.sql` 及必要的 `02_參數異動.md`。每輪都記錄 artifact
+SHA-256、server/database、provider/tool version、fresh baseline、fixture、command、
+exit code、checks 與 error output summary；四輪不完整時維持「待確認」。

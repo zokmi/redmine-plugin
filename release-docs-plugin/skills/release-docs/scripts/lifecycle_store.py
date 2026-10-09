@@ -5,7 +5,7 @@ import os
 import re
 
 
-def write_lifecycle_run(run_root, analysis_result):
+def write_lifecycle_run(run_root, analysis_result, localdb_validation=None):
     """Persist deterministic metadata, rejecting operator paths and replacement."""
     requested = Path(run_root)
     if ".." in requested.parts:
@@ -16,6 +16,16 @@ def write_lifecycle_run(run_root, analysis_result):
         raise ValueError("Run must be inside lifecycle .release-docs/runs/<run-id>")
     if any(p.is_symlink() or p.is_junction() for p in (root, *root.parents)):
         raise ValueError("Linked lifecycle paths are not permitted")
+    lifecycle_metadata = {
+            "schema_version": 1, "run_id": root.name,
+            "retention": {"failed_days": 7, "cleanup_after_success": True},
+            "cleanup_status": "pending_success", "review_status": "pending",
+            "analysis_status": "blocked" if analysis_result.blocked else "ready",
+        }
+    if localdb_validation is not None:
+        if not isinstance(localdb_validation, dict) or localdb_validation.get("schema_version") != 1:
+            raise ValueError("Invalid LocalDB validation evidence")
+        lifecycle_metadata["localdb_validation"] = localdb_validation
     documents = {
         "lifecycle_exclusion_manifest.json": {"schema_version": 1, "exclusions": analysis_result.exclusions},
         "source_unit_metadata.json": {
@@ -24,12 +34,7 @@ def write_lifecycle_run(run_root, analysis_result):
             "units": [{k: v for k, v in u.items() if k != "sql"} for u in analysis_result.units],
             "findings": analysis_result.findings,
         },
-        "lifecycle_metadata.json": {
-            "schema_version": 1, "run_id": root.name,
-            "retention": {"failed_days": 7, "cleanup_after_success": True},
-            "cleanup_status": "pending_success", "review_status": "pending",
-            "analysis_status": "blocked" if analysis_result.blocked else "ready",
-        },
+        "lifecycle_metadata.json": lifecycle_metadata,
     }
     encoded = {name: (json.dumps(document, sort_keys=True, ensure_ascii=True,
                                 indent=2) + "\n").encode("utf-8")
