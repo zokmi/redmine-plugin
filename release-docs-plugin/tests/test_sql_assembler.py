@@ -238,3 +238,73 @@ def test_present_keywords_do_not_validate_transaction_outside_outer_scope(tmp_pa
 def test_unquoted_unicode_identifiers_keep_lexical_source_offsets(tmp_path):
     module, _, text = assembled(tmp_path, units=[unit("unicode", "VALIDATION", "SELECT StraßeStraße FROM dbo.中文;")])
     assert not module.validate_sql_contract(text)
+
+
+@pytest.mark.parametrize("sql, code", [
+    ("SET IMPLICIT_TRANSACTIONS ON;", "implicit_transactions_enabled"),
+    ("SET NOCOUNT, IMPLICIT_TRANSACTIONS ON;", "implicit_transactions_enabled"),
+    ("SET NOEXEC ON;", "execution_disabled"),
+    ("SET NOCOUNT, NOEXEC ON;", "execution_disabled"),
+    ("SET PARSEONLY ON;", "execution_disabled"),
+    ("SET SHOWPLAN_ALL ON;", "execution_disabled"),
+    ("SET SHOWPLAN_TEXT ON;", "execution_disabled"),
+    ("SET SHOWPLAN_XML ON;", "execution_disabled"),
+    ("SET FMTONLY ON;", "execution_disabled"),
+    ("SET XACT_ABORT, NOCOUNT OFF;", "xact_abort_disabled"),
+    ("SET NOCOUNT, XACT_ABORT OFF;", "xact_abort_disabled"),
+    ("CREATE INDEX IX_T ON dbo.T(Id) WITH (ONLINE = ON, RESUMABLE = ON);", "non_transactional_sql"),
+    ("ALTER INDEX IX_T ON dbo.T REBUILD WITH (ONLINE = ON, RESUMABLE = ON);", "non_transactional_sql"),
+    ("ALTER INDEX IX_T ON dbo.T RESUME;", "non_transactional_sql"),
+    ("ALTER INDEX IX_T ON dbo.T PAUSE;", "non_transactional_sql"),
+    ("ALTER INDEX IX_T ON dbo.T ABORT;", "non_transactional_sql"),
+])
+def test_session_options_and_resumable_indexes_block_before_output(tmp_path, sql, code):
+    module = api()
+    output = tmp_path / "absent/01_部署SQL.sql"
+    with pytest.raises(module.SQLContractError) as error:
+        module.assemble_deployment_sql([unit("hazard", "REPAIR", sql)], output, 0)
+    assert code in codes(error.value.findings)
+    assert all(f["unit_id"] == "hazard" for f in error.value.findings)
+    assert not output.parent.exists()
+
+
+@pytest.mark.parametrize("replacement, code", [
+    ("IF 1 = 0 BEGIN TRANSACTION;", "unconditional_transaction_start"),
+    ("IF 1 = 1 BEGIN BEGIN TRANSACTION; END;", "unconditional_transaction_start"),
+    ("SELECT 1; BEGIN TRANSACTION;", "unconditional_transaction_start"),
+])
+def test_transaction_start_must_be_first_unconditional_try_statement(tmp_path, replacement, code):
+    module, _, text = assembled(tmp_path)
+    assert code in codes(module.validate_sql_contract(text.replace("BEGIN TRANSACTION;", replacement)))
+
+
+def test_inherited_implicit_mode_is_normalized_before_transaction(tmp_path):
+    module, _, text = assembled(tmp_path)
+    # Missing normalization must be rejected even when all transaction keyword
+    # counts and mode branches are still present.
+    missing = text.replace("SET IMPLICIT_TRANSACTIONS OFF;", "")
+    assert "missing_implicit_transactions_off" in codes(module.validate_sql_contract(missing))
+    conditional = text.replace("SET IMPLICIT_TRANSACTIONS OFF;", "IF 1 = 0 SET IMPLICIT_TRANSACTIONS OFF;")
+    assert "missing_implicit_transactions_off" in codes(module.validate_sql_contract(conditional))
+
+
+def test_safe_multi_option_settings_and_masked_hazards_preserve_sql(tmp_path):
+    sql = ("SET XACT_ABORT, NOCOUNT ON;\nSET IMPLICIT_TRANSACTIONS OFF;\n"
+           "SET NOEXEC, SHOWPLAN_ALL OFF;\n"
+           "CREATE INDEX IX_T ON dbo.T(Id) WITH (RESUMABLE = OFF);\n"
+           "SELECT N'SET NOEXEC ON; SET XACT_ABORT, NOCOUNT OFF; RESUMABLE = ON';\n"
+           "/* SET IMPLICIT_TRANSACTIONS ON; */\n")
+    module, _, text = assembled(tmp_path, units=[unit("safe", "REPAIR", sql)])
+    assert sql in text
+    assert not module.validate_sql_contract(text)
+
+
+@pytest.mark.parametrize("sql, code", [
+    ("SET IMPLICIT_TRANSACTIONS ON;", "implicit_transactions_enabled"),
+    ("SET NOEXEC ON;", "execution_disabled"),
+    ("SET XACT_ABORT, NOCOUNT OFF;", "xact_abort_disabled"),
+    ("CREATE INDEX IX_T ON dbo.T(Id) WITH (RESUMABLE = ON);", "non_transactional_sql"),
+])
+def test_public_validator_rejects_hazards_added_after_wrapper(tmp_path, sql, code):
+    module, _, text = assembled(tmp_path)
+    assert code in codes(module.validate_sql_contract(text + "\n" + sql))

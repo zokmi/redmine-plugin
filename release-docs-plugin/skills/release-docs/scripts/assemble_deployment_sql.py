@@ -106,14 +106,26 @@ def _matches(pattern, code):
     return re.search(pattern, code, re.MULTILINE | re.DOTALL) is not None
 
 
+def _set_options(code):
+    """Recognize only SQL Server's small SET option[, option] ON/OFF grammar.
+
+    Input has already had literals/comments/quoted identifiers masked. This is
+    not a general statement parser; variable assignments and other SET forms
+    are deliberately outside this helper's grammar.
+    """
+    pattern = r"\bSET\s+([A-Z_][A-Z0-9_]*(?:\s*,\s*[A-Z_][A-Z0-9_]*)*)\s+(ON|OFF)\b"
+    for match in re.finditer(pattern, code):
+        yield {option.strip() for option in match.group(1).split(",")}, match.group(2)
+
+
 def _hazards(sql, is_unit=False):
     code, malformed = _lex(sql)
     findings = []
     checks = [
         ("batch_separator", r"^\s*GO\b[^\r\n]*$"),
         ("non_transactional_sql", r"\b(?:ALTER|CREATE|DROP)\s+DATABASE\b|\b(?:BACKUP|RESTORE|RECONFIGURE)\b|\bWITH\s+ROLLBACK\s+IMMEDIATE\b|\bDBCC\s+SHRINK(?:DATABASE|FILE)\b|\b(?:CREATE|ALTER|DROP)\s+FULLTEXT\b|\bALTER\s+INDEX\b[^;]*\bREORGANIZE\b"),
+        ("non_transactional_sql", r"\b(?:CREATE|ALTER)\s+(?:UNIQUE\s+)?(?:CLUSTERED\s+|NONCLUSTERED\s+)?INDEX\b[^;]*\bRESUMABLE\s*=\s*ON\b|\bALTER\s+INDEX\b[^;]*\b(?:PAUSE|RESUME|ABORT)\b"),
         ("batch_only_sql", r"\b(?:CREATE(?:\s+OR\s+ALTER)?|ALTER)\s+(?:PROC(?:EDURE)?|VIEW|FUNCTION|TRIGGER)\b"),
-        ("xact_abort_disabled", r"\bSET\s+XACT_ABORT\s+OFF\b"),
         ("early_exit", r"\b(?:RETURN|GOTO)\b"),
         ("database_switch", r"\bUSE\b"),
         ("opaque_execution", r"\bEXEC(?:UTE)?\b|^\s*:[A-Z]+\b"),
@@ -126,6 +138,13 @@ def _hazards(sql, is_unit=False):
     for name, pattern in checks:
         if _matches(pattern, code):
             findings.append(_finding(name))
+    for options, state in _set_options(code):
+        if "IMPLICIT_TRANSACTIONS" in options and state == "ON":
+            findings.append(_finding("implicit_transactions_enabled"))
+        if "XACT_ABORT" in options and state == "OFF":
+            findings.append(_finding("xact_abort_disabled"))
+        if state == "ON" and options & {"NOEXEC", "PARSEONLY", "SHOWPLAN_ALL", "SHOWPLAN_TEXT", "SHOWPLAN_XML", "FMTONLY"}:
+            findings.append(_finding("execution_disabled"))
     if malformed:
         findings.append(_finding("malformed_sql_lexeme"))
     catches = list(re.finditer(r"\bBEGIN\s+CATCH\b(.*?)\bEND\s+CATCH\b", code, re.S))
@@ -163,6 +182,11 @@ def validate_sql_contract(sql_text) -> list[Finding]:
     rollback = r"\bIF\s+@VALIDATEONLY\s*=\s*1\s+BEGIN\s+ROLLBACK\s+TRAN(?:SACTION)?\s*;"
     commit = r"\bELSE\s+IF\s+@VALIDATEONLY\s*=\s*0\s+BEGIN\s+COMMIT\s+TRAN(?:SACTION)?\s*;"
     try_code = tries[-1].group(1) if tries else ""
+    preflight = code[:tries[-1].start()] if tries else ""
+    if not re.search(r"(?:^|;)\s*SET\s+IMPLICIT_TRANSACTIONS\s+OFF\s*;\s*$", preflight):
+        findings.append(_finding("missing_implicit_transactions_off"))
+    if not re.match(r"\s*BEGIN\s+TRAN(?:SACTION)?\s*;", try_code):
+        findings.append(_finding("unconditional_transaction_start"))
     if not _matches(rollback, try_code):
         findings.append(_finding("validate_only_rollback"))
     if not _matches(commit, try_code):

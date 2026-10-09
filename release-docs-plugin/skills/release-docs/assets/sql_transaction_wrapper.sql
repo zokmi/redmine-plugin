@@ -13,6 +13,9 @@ DECLARE @TransactionAction nvarchar(64) = N'COMMIT NOT EXECUTED';
 IF @@TRANCOUNT <> 0
     THROW 51001, N'Use a fresh session with no active transaction.', 1;
 
+-- An explicit BEGIN with implicit mode enabled can open two transactions.
+SET IMPLICIT_TRANSACTIONS OFF;
+
 BEGIN TRY
     BEGIN TRANSACTION;
 {{UNITS}}
