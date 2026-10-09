@@ -2,12 +2,17 @@
 import json
 from pathlib import Path
 import os
+import re
 
 
 def write_lifecycle_run(run_root, analysis_result):
     """Persist deterministic metadata, rejecting operator paths and replacement."""
-    root = Path(run_root).absolute()
-    if root.parent.name != "runs" or root.parent.parent.name != ".release-docs":
+    requested = Path(run_root)
+    if ".." in requested.parts:
+        raise ValueError("Traversal is not permitted in lifecycle paths")
+    root = requested.absolute()
+    if (root.parent.name != "runs" or root.parent.parent.name != ".release-docs"
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", root.name)):
         raise ValueError("Run must be inside lifecycle .release-docs/runs/<run-id>")
     if any(p.is_symlink() or p.is_junction() for p in (root, *root.parents)):
         raise ValueError("Linked lifecycle paths are not permitted")

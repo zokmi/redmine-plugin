@@ -202,3 +202,39 @@ def test_operator_directory_hardlink_cannot_be_overwritten_through_lifecycle(fix
     with pytest.raises(ValueError, match="Linked"):
         store.write_lifecycle_run(run, result)
     assert operator.read_text() == "operator file"
+
+
+@pytest.mark.parametrize("source", ["migration.cs", "db.sqlproj"])
+def test_non_sql_execution_descriptor_cannot_cover_itself_and_be_ready(fixture, source):
+    analyzer, _ = api()
+    root, evidence, baseline = fixture
+    (root / source).write_text("NOT EXECUTABLE SQL", encoding="utf-8")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "self coverage")
+    evidence["target_sha"] = git(root, "rev-parse", "HEAD")
+    evidence["committed_changes"] = [{"status": "A", "path": source}]
+    evidence["execution_units"] = [{"unit_id": "pretend", "phase": "SCHEMA", "complete": True,
+                                    "source_path": source, "covers": [source]}]
+    result = analyzer.analyze_release_units(root, evidence, baseline, None)
+    assert result.blocked, "A non-SQL descriptor with zero executable units must block"
+    assert not result.units
+    assert "missing_authoritative_sql" in {f["code"] for f in result.findings}
+
+
+@pytest.mark.parametrize("unsafe", ["..", "../escape", "nested/run", "nested\\run", "/absolute"])
+def test_unsafe_run_id_is_rejected_before_any_lifecycle_write(fixture, tmp_path, unsafe):
+    analyzer, store = api()
+    result = analyzer.analyze_release_units(*fixture, None)
+    root = tmp_path / ".release-docs/runs" / unsafe
+    with pytest.raises(ValueError, match="lifecycle"):
+        store.write_lifecycle_run(root, result)
+    assert not list(tmp_path.rglob("lifecycle_exclusion_manifest.json"))
+
+
+def test_traversal_before_lifecycle_root_is_rejected(fixture, tmp_path):
+    analyzer, store = api()
+    result = analyzer.analyze_release_units(*fixture, None)
+    root = tmp_path / "nominal/../outside/.release-docs/runs/run-1"
+    with pytest.raises(ValueError, match="lifecycle"):
+        store.write_lifecycle_run(root, result)
+    assert not (tmp_path / "outside").exists()

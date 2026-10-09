@@ -26,3 +26,11 @@ Implemented the four requested Task 2 files using Python standard library produc
 The analyzer validates provenance, explicit complete unit boundaries and graph consistency. It does not claim arbitrary SQL parsing, complete-definition SQL repair, transaction validation or deployment validation; those are subsequent plan tasks. Project and migration sources without an authoritative, explicitly mapped SQL unit block production. No actual cleanup or LocalDB execution is implemented in this task.
 
 Only Task 2 production files, tests and this report are included in the requested commit. Existing README and design/plan work remains outside the Task 2 commit.
+
+## P1 review fixes
+
+- Added eight regression cases before changes. RED was **4 failed, 13 passed, 1 skipped**: both migration/project self-coverage descriptors returned ready with no SQL units; `runs/..` and traversal before the lifecycle root wrote outside the intended run. Existing checks already rejected nested run IDs, separator IDs and absolute ID paths.
+- Explicit execution descriptors now require a SQL source; non-SQL descriptors cannot grant coverage. Explicit descriptor analysis yielding zero executable units always records a blocking missing-authoritative-SQL finding.
+- Lifecycle storage rejects any `..` path component before filesystem operations and requires a single safe run ID beneath `.release-docs/runs/`. Valid absolute lifecycle root paths remain supported.
+- GREEN: `pytest release-docs-plugin/tests -q --basetemp C:/Users/kenny/.codex/visualizations/2026/10/09/01a12037-23bb-7990-bf9c-e9a883477d76/task2-review-tests`: **24 passed, 1 skipped**. The hardlink sandbox skip and existing pyreadline destructor warning remain as previously documented. The root suite collection conflict above remains outside this fix.
+- Fix commit message: `fix: harden lifecycle unit provenance`.

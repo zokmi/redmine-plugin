@@ -183,7 +183,11 @@ def analyze_release_units(repo, evidence, baseline_schema, exclusion_intent):
         if path in explicit:
             _finding(result, "partial_execution_artifact", path)
         explicit[path] = descriptor
-        covered.update(_safe_path(p) for p in descriptor.get("covers", []))
+        if _kind(path) != "sql":
+            # Coverage cannot turn a migration/project into executable SQL.
+            _finding(result, "missing_authoritative_sql", path)
+        else:
+            covered.update(_safe_path(p) for p in descriptor.get("covers", []))
     candidates = { _safe_path(c["path"]): c for c in evidence.get("committed_changes", []) if _kind(c["path"]) }
     for path in explicit:
         candidates.setdefault(path, {"path": path, "status": "A"})
@@ -223,6 +227,8 @@ def analyze_release_units(repo, evidence, baseline_schema, exclusion_intent):
             result.units.append(_unit(descriptor, metadata, sql, source_line))
         except (ValueError, TypeError, AttributeError):
             _finding(result, "missing_authoritative_sql", path)
+    if explicit and not result.units:
+        _finding(result, "missing_authoritative_sql")
     _order(result)
     _exclude(result, exclusion_intent)
     return result
