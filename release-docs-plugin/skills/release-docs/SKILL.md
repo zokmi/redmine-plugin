@@ -41,6 +41,10 @@ included_units = [unit for unit in analysis.units if unit["unit_id"] not in excl
 artifact = assemble_deployment_sql(included_units, staging_dir / "01_部署SQL.sql", {
     "validate_only": 1, "release_id": release_id,
 })
+localdb_evidence = run_local_validation(
+    artifact.path, server="(localdb)\\MSSQLLocalDB", database=release_id,
+    baseline_source=str(baseline_schema), fixture_source=str(test_fixture),
+)
 manifest_path = write_lifecycle_run(
     run_root, analysis,
     localdb_validation=localdb_evidence,
