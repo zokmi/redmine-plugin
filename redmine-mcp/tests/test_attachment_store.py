@@ -349,4 +349,3 @@ def test_pending_creation_race_never_creates_or_writes_external_file(tmp_path: P
     finally:
         if changed is not None:
             _set_windows_junction(changed, outside, remove=True)
-
