@@ -105,3 +105,11 @@ def registry(settings) -> Callable[[Callable[[httpx.Request], httpx.Response]], 
         )
 
     return factory
+
+
+@pytest.fixture(autouse=True)
+def attachment_root(tmp_path, monkeypatch):
+    """隔離全部測試的預設管理根，避免寫入真實 appdata。"""
+    root = tmp_path / "managed-attachments"
+    monkeypatch.setattr("redmine_mcp.attachment_storage.store.user_attachment_dir", lambda: root)
+    return root

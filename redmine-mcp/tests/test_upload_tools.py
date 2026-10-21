@@ -59,27 +59,25 @@ async def test_upload_attachment_送出原始位元組並回傳token(settings, r
     assert result["bytes"] == len(PNG_BYTES)
 
 
-async def test_upload_attachment_拒絕上傳目錄外的檔案(registry, tmp_path_factory):
-    outside = tmp_path_factory.mktemp("outside") / "secret.txt"
-    outside.write_bytes(b"secret")
-    calls: list[str] = []
+async def test_upload_attachment_直接上傳外部檔案(registry, tmp_path_factory, attachment_root):
+    source = tmp_path_factory.mktemp("conversation") / "report.txt"
+    source.write_bytes(b"conversation attachment")
+    seen = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.method)
+    def handler(request):
+        seen.append(request.content)
         return json_response(201, {"upload": {"token": "x"}})
 
     sites = registry(handler)
-    mcp = create_server(sites)
-
-    with pytest.raises(Exception) as exc:
-        await _call(mcp, "upload_attachment", {"file_path": str(outside)})
+    result = await _call(create_server(sites), "upload_attachment", {"file_path": str(source)})
     await sites.aclose()
+    assert seen == [b"conversation attachment"]
+    assert result["filename"] == "report.txt"
+    assert source.read_bytes() == b"conversation attachment"
+    assert not attachment_root.exists()
 
-    assert "上傳目錄" in str(exc.value)
-    assert calls == [], "目錄外的檔案不得送出"
 
-
-async def test_upload_attachment_拒絕路徑穿越(settings, registry):
+async def test_upload_attachment_不存在的來源被拒絕(settings, registry):
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -91,7 +89,7 @@ async def test_upload_attachment_拒絕路徑穿越(settings, registry):
 
     with pytest.raises(Exception):
         await _call(
-            mcp, "upload_attachment", {"file_path": str(settings.upload_dir / ".." / "etc.txt")}
+            mcp, "upload_attachment", {"file_path": str(settings.upload_dir / "missing.txt")}
         )
     await sites.aclose()
 
@@ -131,27 +129,26 @@ async def test_upload_attachment_空檔案被拒絕(settings, registry):
     assert "空" in str(exc.value)
 
 
-async def test_未設定上傳目錄時停用上傳() -> None:
+async def test_未設定目錄時可上傳檔案(tmp_path):
+    source = tmp_path / "conversation.txt"
+    source.write_bytes(b"direct upload")
     site_settings = SiteSettings(
-        name="default",
-        url=BASE_URL,
-        api_key="k",
-        description=None,
-        download_dir=None,
-        upload_dir=None,
-        max_attachment_bytes=1024,
+        name="default", url=BASE_URL, api_key="k", description=None,
+        download_dir=None, upload_dir=None, max_attachment_bytes=1024,
     )
-    sites = SiteRegistry(
-        Settings(sites={"default": site_settings}),
-        transports={"default": httpx.MockTransport(lambda r: json_response(200, {}))},
-    )
-    mcp = create_server(sites)
+    seen = []
 
-    with pytest.raises(Exception) as exc:
-        await _call(mcp, "upload_attachment", {"file_path": "any.png"})
+    def handler(request):
+        seen.append(request.content)
+        return json_response(201, {"upload": {"token": "direct-token"}})
+
+    sites = SiteRegistry(Settings(sites={"default": site_settings}),
+                         transports={"default": httpx.MockTransport(handler)})
+    result = await _call(create_server(sites), "upload_attachment", {"file_path": str(source)})
     await sites.aclose()
-
-    assert "upload_dir" in str(exc.value)
+    assert result["token"] == "direct-token"
+    assert seen == [b"direct upload"]
+    assert source.read_bytes() == b"direct upload"
 
 
 async def test_Redmine未回傳token時視為失敗(settings, registry):
@@ -615,29 +612,26 @@ async def test_base64上傳多站台時未指定站台會被拒絕(make_registry
     assert called == []
 
 
-async def test_未設定上傳目錄時base64也停用() -> None:
+async def test_未設定目錄時base64圖片不落地(attachment_root):
     site_settings = SiteSettings(
-        name="default",
-        url=BASE_URL,
-        api_key="k",
-        description=None,
-        download_dir=None,
-        upload_dir=None,
-        max_attachment_bytes=1024,
+        name="default", url=BASE_URL, api_key="k", description=None,
+        download_dir=None, upload_dir=None, max_attachment_bytes=1024,
     )
-    sites = SiteRegistry(
-        Settings(sites={"default": site_settings}),
-        transports={"default": httpx.MockTransport(lambda r: json_response(200, {}))},
-    )
-    mcp = create_server(sites)
+    seen = []
 
-    with pytest.raises(Exception) as exc:
-        await _call(
-            mcp, "upload_attachment", {"content_base64": base64.b64encode(PNG_BYTES).decode()}
-        )
+    def handler(request):
+        seen.append(request.content)
+        return json_response(201, {"upload": {"token": "image-token"}})
+
+    sites = SiteRegistry(Settings(sites={"default": site_settings}),
+                         transports={"default": httpx.MockTransport(handler)})
+    result = await _call(create_server(sites), "upload_attachment",
+                         {"content_base64": base64.b64encode(PNG_BYTES).decode()})
     await sites.aclose()
-
-    assert "upload_dir" in str(exc.value)
+    assert result["token"] == "image-token"
+    assert result["content_type"] == "image/png"
+    assert seen == [PNG_BYTES]
+    assert not attachment_root.exists()
 
 
 def test_safe_upload_filename_移除角括號(tmp_path):
@@ -669,3 +663,120 @@ async def test_上傳非圖片不給內嵌語法(settings, registry):
     await sites.aclose()
 
     assert "markdown" not in result
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory", "symlink", "ancestor_link", "unreadable"])
+async def test_direct_source_failures_never_upload(registry, tmp_path, monkeypatch, kind):
+    from contextlib import contextmanager
+
+    from redmine_mcp.attachment_storage import file_ops
+    from tests.test_attachment_file_ops import _junction
+
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"original")
+    if kind == "missing":
+        source = tmp_path / "missing.txt"
+    elif kind == "directory":
+        source = tmp_path
+    elif kind == "symlink":
+        link = tmp_path / "linked.txt"
+        link.symlink_to(source)
+        source = link
+    elif kind == "ancestor_link":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "source.txt").write_bytes(b"original")
+        _junction(tmp_path / "redirect", outside)
+        source = tmp_path / "redirect" / "source.txt"
+    else:
+        @contextmanager
+        def denied(path):
+            raise PermissionError("source unreadable")
+            yield
+
+        monkeypatch.setattr(file_ops, "open_regular", denied)
+    sent = []
+
+    def handler(request):
+        sent.append(request.content)
+        return json_response(201, {"upload": {"token": "unexpected"}})
+
+    sites = registry(handler)
+    with pytest.raises(Exception) as exc:
+        await _call(create_server(sites), "upload_attachment", {"file_path": str(source)})
+    await sites.aclose()
+    assert str(exc.value)
+    assert sent == []
+    assert (tmp_path / "source.txt").read_bytes() == b"original"
+
+
+async def test_managed_source_reads_in_worker_and_releases_before_callback(registry, tmp_path):
+    import threading
+    from contextlib import contextmanager
+
+    from mcp.server import MCPServer
+
+    from redmine_mcp.attachment_storage import AttachmentStore, file_ops
+    from redmine_mcp.tools import attachments
+
+    event_thread = threading.get_ident()
+    observed = []
+
+    class ObservedStore(AttachmentStore):
+        @contextmanager
+        def borrow_source(self, path, max_bytes):
+            observed.append(threading.get_ident())
+            with super().borrow_source(path, max_bytes) as data:
+                yield data
+
+    store = ObservedStore(tmp_path / "managed")
+    with store.begin_download(BASE_URL, "source.txt") as pending:
+        with pending.open_writer() as writer:
+            writer.write(b"managed content")
+        source = pending.publish()
+    record = store._record_for(source)
+    callbacks = []
+
+    def callback():
+        with file_ops.try_lock(store.lock_path(record)) as acquired:
+            callbacks.append(acquired)
+
+    sites = registry(lambda r: json_response(201, {"upload": {"token": "managed-token"}}))
+    mcp = MCPServer("attachment-test")
+    attachments.register(mcp, sites, store=store, on_operation=callback)
+    result = await _call(mcp, "upload_attachment", {"file_path": str(source)})
+    await sites.aclose()
+    assert result["token"] == "managed-token"
+    assert len(observed) == 1 and observed[0] != event_thread
+    assert callbacks == [True]
+    assert source.read_bytes() == b"managed content"
+
+
+async def test_busy_managed_source_reports_retry_without_upload(registry, tmp_path):
+    from mcp.server import MCPServer
+
+    from redmine_mcp.attachment_storage import AttachmentStore, file_ops
+    from redmine_mcp.tools import attachments
+
+    store = AttachmentStore(tmp_path / "managed")
+    with store.begin_download(BASE_URL, "source.txt") as pending:
+        with pending.open_writer() as writer:
+            writer.write(b"content")
+        source = pending.publish()
+    record = store._record_for(source)
+    sent = []
+
+    def handler(request):
+        sent.append(request.content)
+        return json_response(201, {"upload": {"token": "unexpected"}})
+
+    sites = registry(handler)
+    mcp = MCPServer("attachment-test")
+    attachments.register(mcp, sites, store=store)
+    with file_ops.try_lock(store.lock_path(record)) as acquired:
+        assert acquired
+        with pytest.raises(Exception) as exc:
+            await _call(mcp, "upload_attachment", {"file_path": str(source)})
+    await sites.aclose()
+    assert "使用中" in str(exc.value)
+    assert sent == []

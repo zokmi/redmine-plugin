@@ -122,7 +122,7 @@ async def test_list_attachments_列出附件(registry):
     assert "content_url" not in attachments[0]
 
 
-async def test_download_attachment_成功寫檔(settings, registry, tmp_path):
+async def test_download_attachment_成功寫檔(settings, registry, attachment_root):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/attachments/5.json":
             return json_response(
@@ -145,61 +145,19 @@ async def test_download_attachment_成功寫檔(settings, registry, tmp_path):
 
     saved = Path(result["path"])
     assert saved.read_bytes() == b"hello"
-    assert saved.parent == settings.download_dir / "default"
+    assert saved.is_relative_to(attachment_root)
+    assert saved.parent.parent.name == "active"
 
 
-async def test_download_attachment_檔名含角括號時path與磁碟實際路徑一致(
-    settings, registry, monkeypatch
-):
-    # safe_destination() 的 _UNSAFE_CHARS 不含 `<`，落地檔名會原樣保留 `<`；
-    # 若回傳的 path 又被 neutralize_untrusted_markers 轉義成 `&lt;`，會變成一個
-    # 磁碟上不存在的路徑——工具說明講的是「回傳落地路徑」，模型讀 path 或把它當
-    # file_path 餵回 upload_attachment 都會失敗。path 必須回傳原始字面值。
-    #
-    # `<` 同時是 Windows 檔案系統本身禁止的字元（另一個已知但本次不處理的 P3 問題），
-    # 在 Windows 上這個檔名連 OS 層都無法真的落地，因此這裡改為驗證「path 與
-    # safe_destination() 算出來、client.stream_to_file() 實際會寫入的目的地
-    # 完全一致（未被中和）」，而不強求本測試環境的 OS 真的建立這個檔案。
-    expected_dest = safe_destination(
-        settings.download_dir / "default", "a<b.txt", 5  # type: ignore[union-attr]
-    )
-    written_to: list[Path] = []
-
-    async def fake_stream_to_file(self, url, dest, max_bytes):
-        # 不落地寫檔：`<` 在 Windows 檔案系統本身就不合法，這裡只驗證
-        # download_attachment 傳給 stream_to_file()、以及回傳給呼叫端的 path，
-        # 是否為同一個未經中和的路徑。
-        written_to.append(dest)
-        return 5
-
-    monkeypatch.setattr(
-        "redmine_mcp.client.RedmineClient.stream_to_file", fake_stream_to_file
-    )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/attachments/5.json":
-            return json_response(
-                200,
-                {
-                    "attachment": {
-                        "id": 5,
-                        "filename": "a<b.txt",
-                        "filesize": 5,
-                        "content_url": f"{BASE_URL}/attachments/download/5/a%3Cb.txt",
-                    }
-                },
-            )
-        return httpx.Response(200, content=b"hello")
-
-    sites = registry(handler)
-    mcp = create_server(sites)
-    result = await _call(mcp, "download_attachment", {"attachment_id": 5})
+async def test_download_attachment_檔名含角括號時path與磁碟實際路徑一致(registry):
+    sites = registry(_attachment_handler("a<b.txt", b"hello"))
+    result = await _call(create_server(sites), "download_attachment", {"attachment_id": 5})
     await sites.aclose()
-
-    path_value = result["path"]
-    assert "&lt;" not in path_value
-    assert path_value == str(expected_dest)
-    assert written_to == [expected_dest]
+    saved = Path(result["path"])
+    assert saved.name == "5_ab.txt"
+    assert result["filename"] == saved.name
+    assert saved.read_bytes() == b"hello"
+    assert "&lt;" not in result["path"]
 
 
 async def test_download_attachment_拒絕外部來源的_content_url(registry):
@@ -219,7 +177,7 @@ async def test_download_attachment_拒絕外部來源的_content_url(registry):
     assert "來源" in str(exc.value) or "origin" in str(exc.value).lower()
 
 
-async def test_download_attachment_超過大小上限時中止並清除半檔(settings, registry):
+async def test_download_attachment_超限不發布半成品(settings, registry, attachment_root):
     oversized = b"x" * (settings.max_attachment_bytes + 10)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -237,8 +195,9 @@ async def test_download_attachment_超過大小上限時中止並清除半檔(se
         await _call(mcp, "download_attachment", {"attachment_id": 5})
     await sites.aclose()
 
-    site_dir = settings.download_dir / "default"
-    assert not site_dir.exists() or list(site_dir.iterdir()) == [], "半成品檔案應被刪除"
+    assert not list(attachment_root.rglob("*.json"))
+    assert not list(attachment_root.rglob("5_big.bin"))
+    assert len(list(attachment_root.rglob(".download.part"))) == 1
 
 
 async def test_download_attachment_不同id同檔名不覆蓋(settings, registry):
@@ -334,27 +293,22 @@ async def test_下載超過大小上限時不影響既有同名檔案(settings, 
     assert list(site_dir.iterdir()) == [existing_path]
 
 
-async def test_未設定下載目錄時停用下載(tmp_path) -> None:
+async def test_未設定目錄時自動下載且重下載隔離(attachment_root):
     site_settings = SiteSettings(
-        name="default",
-        url=BASE_URL,
-        api_key="k",
-        description=None,
-        download_dir=None,
-        upload_dir=None,
-        max_attachment_bytes=1024,
+        name="default", url=BASE_URL, api_key="k", description=None,
+        download_dir=None, upload_dir=None, max_attachment_bytes=1024,
     )
-    sites = SiteRegistry(
-        Settings(sites={"default": site_settings}),
-        transports={"default": httpx.MockTransport(lambda r: json_response(200, {}))},
-    )
+    sites = SiteRegistry(Settings(sites={"default": site_settings}),
+                         transports={"default": httpx.MockTransport(_attachment_handler("a.txt", b"ok"))})
     mcp = create_server(sites)
-
-    with pytest.raises(Exception) as exc:
-        await _call(mcp, "download_attachment", {"attachment_id": 5})
+    assert not attachment_root.exists()
+    first = await _call(mcp, "download_attachment", {"attachment_id": 5})
+    second = await _call(mcp, "download_attachment", {"attachment_id": 5})
     await sites.aclose()
-
-    assert "download_dir" in str(exc.value)
+    assert first["path"] != second["path"]
+    assert Path(first["path"]).read_bytes() == Path(second["path"]).read_bytes() == b"ok"
+    assert Path(first["path"]).is_relative_to(attachment_root)
+    assert len(list(attachment_root.rglob("*.json"))) == 2
 
 
 def _attachment_handler(filename: str, body: bytes):
@@ -377,14 +331,17 @@ def _attachment_handler(filename: str, body: bytes):
     return handler
 
 
-async def test_下載落地於站台子目錄(make_registry, tmp_path):
+async def test_下載落地於站台雜湊及獨立目錄(make_registry, attachment_root):
     sites = make_registry({"main": _attachment_handler("報告.pdf", b"AAA")})
     mcp = create_server(sites)
     result = await call_tool(mcp, "download_attachment", {"attachment_id": 42})
     await sites.aclose()
 
     assert result["site"] == "main"
-    assert Path(result["path"]).parent.name == "main"
+    from redmine_mcp.attachment_storage.paths import site_storage_key
+
+    relative = Path(result["path"]).relative_to(attachment_root)
+    assert relative.parts[:2] == (site_storage_key("https://main.example.com"), "active")
     assert Path(result["path"]).read_bytes() == b"AAA"
 
 
@@ -553,3 +510,91 @@ def test_safe_destination_移除雙向覆寫字元避免副檔名視覺偽裝(tm
     """U+202E 可讓 `gpj.exe` 在檔案總管顯示成 `exe.jpg`，誘使使用者誤開執行檔。"""
     dest = safe_destination(tmp_path, "invoice‮gpj.exe")
     assert "‮" not in dest.name
+
+
+@pytest.mark.parametrize("operation", ["list", "download", "upload"])
+@pytest.mark.parametrize("failure", [False, True])
+async def test_operation_callback_failure_preserves_outcome(registry, tmp_path, operation, failure):
+    from mcp.server import MCPServer
+
+    from redmine_mcp.attachment_storage import AttachmentStore, file_ops
+    from redmine_mcp.tools import attachments
+
+    store = AttachmentStore(tmp_path / "managed")
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"upload bytes")
+    callbacks = []
+
+    def callback():
+        for path in store.root.glob("*/locks/*.lock"):
+            with file_ops.try_lock(path) as acquired:
+                assert acquired
+        callbacks.append(True)
+        raise RuntimeError("callback must not replace result")
+
+    def handler(request):
+        if failure:
+            return json_response(403, {})
+        if operation == "upload":
+            return json_response(201, {"upload": {"token": "token"}})
+        if operation == "list":
+            return json_response(200, {"issue": {"attachments": []}})
+        return _attachment_handler("source.txt", b"download bytes")(request)
+
+    sites = registry(handler)
+    mcp = MCPServer("attachment-test")
+    attachments.register(mcp, sites, store=store, on_operation=callback)
+    args = {"list": {"issue_id": 1}, "download": {"attachment_id": 42},
+            "upload": {"file_path": str(source)}}[operation]
+    name = {"list": "list_attachments", "download": "download_attachment", "upload": "upload_attachment"}[operation]
+    if failure and operation != "list":
+        with pytest.raises(Exception) as exc:
+            await _call(mcp, name, args)
+        assert "403" in str(exc.value)
+        assert "callback must" not in str(exc.value)
+    else:
+        result = await _call(mcp, name, args)
+        if operation == "download":
+            assert Path(result["path"]).read_bytes() == b"download bytes"
+        elif operation == "upload":
+            assert result["token"] == "token"
+        else:
+            assert ("error" in result["sites"]["default"]) if failure else result["found_in"] == ["default"]
+    await sites.aclose()
+    assert callbacks == [True]
+
+
+async def test_unique_downloads_are_not_advertised_as_idempotent(registry):
+    sites = registry(lambda r: json_response(200, {}))
+    tool = next(tool for tool in await create_server(sites).list_tools() if tool.name == "download_attachment")
+    await sites.aclose()
+    assert tool.annotations.idempotent_hint is False
+
+
+@pytest.mark.parametrize("failure", ["http", "size"])
+async def test_failed_redownload_retains_previous_managed_file_and_record(registry, attachment_root, failure):
+    import json
+
+    downloaded = False
+
+    def handler(request):
+        if request.url.path.endswith(".json"):
+            return _attachment_handler("source.txt", b"unused")(request)
+        if downloaded:
+            return httpx.Response(500) if failure == "http" else httpx.Response(200, content=b"x" * 1025)
+        return httpx.Response(200, content=b"previous download")
+
+    sites = registry(handler)
+    mcp = create_server(sites)
+    result = await _call(mcp, "download_attachment", {"attachment_id": 42})
+    source = Path(result["path"])
+    record_path = next(attachment_root.rglob("*.json"))
+    before = json.loads(record_path.read_text(encoding="utf-8"))
+    downloaded = True
+    with pytest.raises(Exception):
+        await _call(mcp, "download_attachment", {"attachment_id": 42})
+    await sites.aclose()
+    assert source.read_bytes() == b"previous download"
+    assert json.loads(record_path.read_text(encoding="utf-8")) == before
+    assert list(attachment_root.rglob("*.json")) == [record_path]
+    assert len(list(attachment_root.rglob(".download.part"))) == 1

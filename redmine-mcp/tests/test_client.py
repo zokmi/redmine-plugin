@@ -414,3 +414,104 @@ async def test_422_錯誤訊息中的圍籬標記已被中和(settings, make_tra
     assert "&lt;/redmine_content&gt;" in 訊息
     # 文字本身不遺失，使用者仍看得懂哪個值重複了。
     assert "已經被使用" in 訊息
+
+
+async def test_download_to_stream_bounded(settings, make_transport):
+    from io import BytesIO
+
+    served, closed, seen = [], [], {}
+
+    def handler(request):
+        seen.update(request.extensions)
+
+        class Stream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                for _ in range(100):
+                    served.append(1)
+                    yield b"x" * 100
+
+            async def aclose(self):
+                closed.append(True)
+
+        return httpx.Response(200, stream=Stream())
+
+    client = RedmineClient(settings, transport=make_transport(handler))
+    stream = BytesIO()
+    with pytest.raises(RedmineServerError, match="250"):
+        await client.download_to_stream(f"{BASE_URL}/file", stream, 250)
+    await client.aclose()
+    assert stream.getvalue() == b"x" * 200
+    assert not stream.closed
+    assert len(served) == 3
+    assert closed == [True]
+    assert seen[EXT_MAX_FILESIZE] == 250
+    assert seen[EXT_TOTAL_TIMEOUT] > 60
+
+
+async def test_download_to_stream_success(settings, make_transport):
+    from io import BytesIO
+
+    client = RedmineClient(settings, transport=make_transport(lambda r: httpx.Response(200, content=b"ok")))
+    stream = BytesIO()
+    assert await client.download_to_stream(f"{BASE_URL}/file", stream, 2) == 2
+    await client.aclose()
+    assert stream.getvalue() == b"ok"
+    assert not stream.closed
+
+
+@pytest.mark.parametrize("failure", ["http", "transport", "size", "cancel"])
+async def test_download_to_stream_failure(settings, make_transport, failure):
+    import asyncio
+    from io import BytesIO
+
+    def handler(request):
+        if failure == "http":
+            return httpx.Response(500)
+        if failure == "transport":
+            raise httpx.ConnectError("connection failed")
+        if failure == "size":
+            raise CurlFileSizeExceeded("limit")
+        raise asyncio.CancelledError()
+
+    expected = {"http": RedmineServerError, "transport": RedmineConnectionError,
+                "size": RedmineServerError, "cancel": asyncio.CancelledError}[failure]
+    client = RedmineClient(settings, transport=make_transport(handler))
+    stream = BytesIO()
+    with pytest.raises(expected):
+        await client.download_to_stream(f"{BASE_URL}/file", stream, 1024)
+    await client.aclose()
+    assert stream.getvalue() == b""
+    assert not stream.closed
+
+
+@pytest.mark.parametrize("failure", ["cancel", "write"])
+async def test_download_to_stream_midstream_failure_closes_response(settings, make_transport, failure):
+    import asyncio
+    from io import BytesIO
+
+    closed = []
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"first"
+            if failure == "cancel":
+                raise asyncio.CancelledError()
+            yield b"second"
+
+        async def aclose(self):
+            closed.append(True)
+
+    class Destination(BytesIO):
+        def write(self, chunk):
+            if failure == "write":
+                raise OSError("disk full")
+            return super().write(chunk)
+
+    client = RedmineClient(settings, transport=make_transport(lambda r: httpx.Response(200, stream=Stream())))
+    stream = Destination()
+    with pytest.raises(asyncio.CancelledError if failure == "cancel" else OSError):
+        await client.download_to_stream(f"{BASE_URL}/file", stream, 1024)
+    await client.aclose()
+    assert closed == [True]
+    assert not stream.closed
+    assert stream.getvalue() == (b"first" if failure == "cancel" else b"")

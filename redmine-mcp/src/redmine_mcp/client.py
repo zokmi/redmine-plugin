@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import httpx
 
@@ -183,6 +183,37 @@ class RedmineClient:
         """發出 PUT 請求；Redmine 成功時回 204 無內容。"""
         await self._send("PUT", path, json=payload)
         return None
+
+    async def download_to_stream(self, url: str, stream: BinaryIO, max_bytes: int) -> int:
+        """有界下載至呼叫方安全開啟的串流，不操作路徑或關閉串流。
+
+        url 須先由呼叫方確認同源。HTTP 失敗、超限、寫入失敗或取消均會關閉
+        HTTP 回應；已寫入的半成品由呼叫方管理，完成後再由呼叫方發布。
+        """
+        written = 0
+        try:
+            async with self._http.stream(
+                "GET", url,
+                extensions={
+                    EXT_TOTAL_TIMEOUT: _DOWNLOAD_TOTAL_TIMEOUT_SECONDS,
+                    EXT_MAX_FILESIZE: max_bytes,
+                },
+            ) as response:
+                self._raise_for_status(response)
+                async for chunk in response.aiter_bytes():
+                    if written + len(chunk) > max_bytes:
+                        raise RedmineServerError(
+                            f"附件超過大小上限 {max_bytes} 位元組，已中止下載"
+                        )
+                    stream.write(chunk)
+                    written += len(chunk)
+        except CurlFileSizeExceeded as exc:
+            raise RedmineServerError(
+                f"附件超過大小上限 {max_bytes} 位元組，已中止下載"
+            ) from exc
+        except httpx.TransportError as exc:
+            raise _wrap_transport_error(exc) from exc
+        return written
 
     async def stream_to_file(self, url: str, dest: Path, max_bytes: int) -> int:
         """串流下載至指定路徑，超過上限即中止並清除半成品，不影響既有同名檔案。
