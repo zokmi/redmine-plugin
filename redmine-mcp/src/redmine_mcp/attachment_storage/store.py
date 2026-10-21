@@ -156,8 +156,15 @@ class AttachmentStore:
     def __init__(
         self, root: Path | None = None, *, clock: Callable[[], datetime] = utc_now
     ) -> None:
-        self.root = Path(os.path.abspath(root if root is not None else user_attachment_dir()))
+        self._root = Path(os.path.abspath(root)) if root is not None else None
         self.clock = clock
+
+    @property
+    def root(self) -> Path:
+        """預設根延後到首次使用才解析；建構 server 不依賴本機目錄可用性。"""
+        if self._root is None:
+            self._root = Path(os.path.abspath(user_attachment_dir()))
+        return self._root
 
     def item_path(self, record: ItemRecord) -> Path:
         record = ItemRecord.from_json(record.to_json())

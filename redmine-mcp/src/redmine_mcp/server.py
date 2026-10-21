@@ -1,9 +1,14 @@
 """MCP server 組裝。"""
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from mcp.server import MCPServer
 
 from redmine_mcp import __version__
+from redmine_mcp.attachment_storage import AttachmentStore
+from redmine_mcp.attachment_storage.scheduler import CleanupScheduler
 from redmine_mcp.sites import SiteRegistry
 from redmine_mcp.tools import attachments, issues, metadata, projects
 
@@ -47,16 +52,30 @@ def build_instructions(sites: SiteRegistry) -> str:
     return _BASE_INSTRUCTIONS + site_note
 
 
-def create_server(sites: SiteRegistry) -> MCPServer:
+def create_server(
+    sites: SiteRegistry, *, store: AttachmentStore | None = None
+) -> MCPServer:
     """建立並回傳已註冊所有工具的 MCP server。
 
     參數:
         sites: 已建立所有站台 client 的註冊表；測試可注入使用 MockTransport 的實例。
     """
+    attachment_store = store if store is not None else AttachmentStore()
+    scheduler = CleanupScheduler(attachment_store)
+
+    @asynccontextmanager
+    async def lifespan(_: MCPServer) -> AsyncIterator[None]:
+        scheduler.start()
+        try:
+            yield
+        finally:
+            scheduler.close()
+
     mcp = MCPServer(
         SERVER_NAME,
         instructions=build_instructions(sites),
         version=SERVER_VERSION,
+        lifespan=lifespan,
         # 這裡原本對 tools/list 宣告一小時的 public 快取，已移除：它不會生效。
         # 快取欄位（ttlMs／cacheScope）是 2026-07-28 協定版的功能，SDK 只在
         # 連線協商到該版本時才送出；而 HANDSHAKE_PROTOCOL_VERSIONS 最高只到
@@ -66,6 +85,6 @@ def create_server(sites: SiteRegistry) -> MCPServer:
     )
     metadata.register(mcp, sites)
     issues.register(mcp, sites)
-    attachments.register(mcp, sites)
+    attachments.register(mcp, sites, store=attachment_store, on_operation=scheduler.trigger)
     projects.register(mcp, sites)
     return mcp

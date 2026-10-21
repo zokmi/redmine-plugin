@@ -150,3 +150,143 @@ async def test_指示詞與寫入工具改指向載體中立的格式來源(regi
     assert "redmine-issue-guides" not in instructions, "plugin 安裝不應指向舊手動安裝路徑"
     for name in ("create_issue", "update_issue", "add_issue_note"):
         assert "get_issue_guide" not in tools[name], f"{name} 仍指向已刪除的工具"
+
+
+async def test_實際連線生命週期才啟動清理且慢掃描不阻擋附件工具(registry, tmp_path, capsys):
+    import asyncio
+    import threading
+
+    import anyio
+
+    from .conftest import BASE_URL, call_tool
+    from .test_attachment_scheduler import ScanStore
+
+    class SlowStore(ScanStore):
+        def sweep(self, stop=None):
+            self.calls += 1
+            self.stop = stop
+            self.entered.set()
+            assert stop.wait(3), "server 關閉未通知背景掃描"
+            self.finished.set()
+
+    def handler(request):
+        if request.url.path == "/attachments/5.json":
+            return httpx.Response(200, json={"attachment": {
+                "id": 5, "filename": "a.txt", "filesize": 5,
+                "content_url": f"{BASE_URL}/attachments/download/5/a.txt",
+            }})
+        return httpx.Response(200, content=b"hello")
+
+    sites = registry(handler)
+    store = SlowStore(tmp_path)
+    mcp = create_server(sites, store=store)
+    assert store.calls == 0
+    assert not any(t.name == "redmine-attachment-cleanup" for t in threading.enumerate())
+    send, receive = anyio.create_memory_object_stream(1)
+    output, _ = anyio.create_memory_object_stream(1)
+    task = asyncio.create_task(mcp._lowlevel_server.run(
+        receive, output, mcp._lowlevel_server.create_initialization_options()
+    ))
+    try:
+        with anyio.fail_after(2):
+            while not store.entered.is_set():
+                await anyio.sleep(0.001)
+        with anyio.fail_after(0.5):
+            result = await call_tool(mcp, "download_attachment", {"attachment_id": 5})
+        assert result is not None
+        assert store.calls == 1
+        saved = Path(result["path"])
+        assert saved.is_relative_to(store.root)
+        assert saved.read_bytes() == b"hello"
+    finally:
+        await send.aclose()
+        with anyio.fail_after(1):
+            await task
+        await sites.aclose()
+    assert store.stop.is_set()
+    assert store.finished.wait(1)
+    assert capsys.readouterr().out == ""
+
+
+async def test_預設根解析失敗仍可啟動並使用其他工具(registry, monkeypatch, caplog, capsys):
+    import asyncio
+
+    import anyio
+
+    from .conftest import call_tool
+
+    attempts = []
+
+    def unavailable_root():
+        attempts.append(True)
+        raise OSError("secret-api-key")
+
+    monkeypatch.setattr(
+        "redmine_mcp.attachment_storage.store.user_attachment_dir", unavailable_root
+    )
+    sites = registry(lambda r: httpx.Response(200))
+    mcp = create_server(sites)
+    assert attempts == []
+    send, receive = anyio.create_memory_object_stream(1)
+    output, _ = anyio.create_memory_object_stream(1)
+    task = asyncio.create_task(mcp._lowlevel_server.run(
+        receive, output, mcp._lowlevel_server.create_initialization_options()
+    ))
+    try:
+        with anyio.fail_after(2):
+            while not caplog.records:
+                await anyio.sleep(0.001)
+        result = await call_tool(mcp, "list_sites")
+        assert result is not None
+        assert attempts
+        assert any(record.levelname == "WARNING" for record in caplog.records)
+        assert "secret-api-key" not in caplog.text
+    finally:
+        await send.aclose()
+        with anyio.fail_after(1):
+            await task
+        await sites.aclose()
+    assert capsys.readouterr().out == ""
+
+
+async def test_附件操作通知同一排程器的每小時掃描(registry, tmp_path, monkeypatch):
+    import asyncio
+    from functools import partial
+
+    import anyio
+
+    from redmine_mcp.attachment_storage.scheduler import CleanupScheduler
+
+    from .conftest import call_tool
+    from .test_attachment_scheduler import ScanStore, wait_idle
+
+    clock = [0.0]
+    monkeypatch.setattr(
+        "redmine_mcp.server.CleanupScheduler",
+        partial(CleanupScheduler, monotonic=lambda: clock[0]),
+    )
+    sites = registry(lambda r: httpx.Response(200, json={"issue": {"attachments": []}}))
+    store = ScanStore(tmp_path)
+    mcp = create_server(sites, store=store)
+    send, receive = anyio.create_memory_object_stream(1)
+    output, _ = anyio.create_memory_object_stream(1)
+    task = asyncio.create_task(mcp._lowlevel_server.run(
+        receive, output, mcp._lowlevel_server.create_initialization_options()
+    ))
+    try:
+        with anyio.fail_after(2):
+            while not store.finished.is_set():
+                await anyio.sleep(0.001)
+        wait_idle()
+        clock[0] = 3600
+        await call_tool(mcp, "list_attachments", {"issue_id": 1})
+        with anyio.fail_after(2):
+            while store.calls < 2:
+                await anyio.sleep(0.001)
+        wait_idle()
+        assert store.calls == 2
+    finally:
+        await send.aclose()
+        with anyio.fail_after(1):
+            await task
+        await sites.aclose()
