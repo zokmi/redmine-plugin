@@ -1749,3 +1749,30 @@ def test_setup_replacing_site_keeps_legacy_path_text(tmp_path):
     assert "download_dir = '~/old-download' # untouched" in content
     assert 'upload_dir = "~/old-upload"' in content
     assert 'unknown_field = "keep"' in content
+
+
+@pytest.mark.parametrize("fields", [
+    '  url = "https://a"\n\tapi_key = "old-key"\n',
+    r'"\u0075rl" = "https://a"' + "\n" + r'"api_\u006bey" = "old-key"' + "\n",
+])
+def test_wizard_converts_valid_legacy_statements_without_touching_global_text(tmp_path, fields):
+    import tomllib
+
+    target = tmp_path / "config.toml"
+    globals_text = ('download_dir = """\nurl = "decoy"\n[sites.default]\n""" # keep\n'
+                    "upload_dir = '~/untouched'\nmax_attachment_mb = 25\n")
+    description = "description = '''first\nsecond'''\n"
+    target.write_text(globals_text + fields + description, encoding="utf-8")
+    script = 腳本化提問(answers=["https://b", "new-key", "second", ""],
+                         confirms=[True, True], choices=[0])
+    assert run_setup(script.build(), config_path=target, run=_固定回應(0),
+                     verify=_成功驗證, finish=False) == 0
+    script.assert_exhausted()
+    content = target.read_text(encoding="utf-8")
+    assert globals_text in content
+    parsed = tomllib.loads(content)
+    assert parsed["sites"]["default"] == {
+        "url": "https://a", "api_key": "old-key", "description": "first\nsecond",
+    }
+    assert parsed["sites"]["second"]["url"] == "https://b"
+    assert parsed["max_attachment_mb"] == 25

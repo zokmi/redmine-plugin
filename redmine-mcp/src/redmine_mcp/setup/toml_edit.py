@@ -389,18 +389,37 @@ def convert_legacy(text: str) -> str:
     """
     if classify(text) != "legacy":
         raise ConfigError("這份參數檔不是舊的扁平格式，不需要轉換")
-    raw = tomllib.loads(text)
-    block = render_site_block(
-        "default",
-        str(raw.get("url", "")),
-        str(raw.get("api_key", "")),
-        str(raw["description"]) if raw.get("description") else None,
-    )
-    # 保留舊全域鍵的原始文字（含字面值），只搬移站台欄位。
-    remaining = text
-    for key in ("url", "api_key", "description"):
-        remaining = remove_key_in(remaining, global_region(remaining), key)
-    return upsert_site_block(remaining, "default", block)
+    # 只用 tomllib 辨識完整敘述；字串內的鍵名、表格標頭與註解都只是值的一部分。
+    remaining: list[str] = []
+    moved: list[str] = []
+    pending = ""
+    at_root = True
+    for line in text.splitlines(keepends=True):
+        pending += line
+        try:
+            statement = tomllib.loads(pending)
+        except tomllib.TOMLDecodeError:
+            # 合法全文已由 classify 驗證；此時只可能尚未讀完跨行敘述。
+            continue
+        if pending.lstrip().startswith("["):
+            at_root = False
+        if at_root and {"url", "api_key", "description"} & statement.keys():
+            moved.append(pending)
+        else:
+            remaining.append(pending)
+        pending = ""
+    if pending:
+        raise ConfigError("無法辨識舊參數檔的完整 TOML 敘述，參數檔未變更")
+
+    # 搬移原文，保留跨行字串與引號／逸出語法；不經過通用的逐行編輯器。
+    prefix = "".join(remaining)
+    block = "[sites.default]\n" + "".join(moved)
+    if not block.endswith("\n"):
+        block += "\n"
+    if not prefix:
+        return block
+    separator = "\n" if prefix.endswith("\n") else "\n\n"
+    return prefix + separator + block
 
 
 

@@ -1,3 +1,5 @@
+import tomllib
+
 import pytest
 
 from redmine_mcp.config import ConfigError
@@ -137,7 +139,7 @@ def test_舊格式轉成_sites_default_並保留全域鍵():
     assert classify(result) == "sites"
     assert 'download_dir = "D:/dl"' in result
     assert "[sites.default]" in result
-    assert 'api_key     = "k"' in result
+    assert tomllib.loads(result)["sites"]["default"]["api_key"] == "k"
 
 
 def test_轉換保留原有的說明():
@@ -403,3 +405,47 @@ def test_legacy_conversion_preserves_paths_spelling_and_limit():
     assert "upload_dir = '~/other'" in result
     assert "max_attachment_mb = 25" in result
     validate_config_text(result)
+
+
+@pytest.mark.parametrize("fields", [
+    '  url = "https://a"\n\tapi_key = "k"\n',
+    '\'url\' = "https://a"\n"api_key" = "k"\n',
+    r'"\u0075rl" = "https://a"' + "\n" + r'"api_\u006bey" = "k"' + "\n",
+])
+def test_legacy_conversion_accepts_valid_key_spellings(fields):
+    original = 'download_dir = "~/keep" # exact\nmax_attachment_mb = 25\n' + fields
+    converted = convert_legacy(original)
+    validate_config_text(converted)
+    parsed = tomllib.loads(converted)
+    assert parsed["sites"]["default"] == {"url": "https://a", "api_key": "k"}
+    assert parsed["max_attachment_mb"] == 25
+    assert 'download_dir = "~/keep" # exact' in converted
+
+
+@pytest.mark.parametrize("quote", ['"""', "'" * 3])
+def test_legacy_conversion_moves_complete_multiline_description(quote):
+    description = f'description = {quote}first\nsecond{quote} # description\n'
+    original = 'url = "https://a"\napi_key = "k"\n' + description
+    converted = convert_legacy(original)
+    validate_config_text(converted)
+    assert tomllib.loads(converted)["sites"]["default"]["description"] == "first\nsecond"
+    assert description in converted
+
+
+@pytest.mark.parametrize("quote", ['"""', "'" * 3])
+def test_legacy_conversion_never_reads_keys_or_headers_inside_multiline_path(quote):
+    path_statement = (f'download_dir = {quote}\n'
+                      'url = "decoy"\napi_key = "decoy"\ndescription = "decoy"\n'
+                      '[sites.default]\n# embedded comment\n' + quote + ' # exact\n')
+    nested = '[extra]\nurl = "nested"\napi_key = "nested-key"\n'
+    original = (path_statement + 'max_attachment_mb = 25\n'
+                '  url = "https://a"\n"api_key" = "k"\n' + nested)
+    converted = convert_legacy(original)
+    validate_config_text(converted)
+    parsed = tomllib.loads(converted)
+    assert path_statement in converted
+    assert nested in converted
+    assert parsed["download_dir"] == tomllib.loads(original)["download_dir"]
+    assert parsed["max_attachment_mb"] == 25
+    assert parsed["sites"]["default"] == {"url": "https://a", "api_key": "k"}
+    assert parsed["extra"] == {"url": "nested", "api_key": "nested-key"}
