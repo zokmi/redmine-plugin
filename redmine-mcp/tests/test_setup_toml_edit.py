@@ -449,3 +449,31 @@ def test_legacy_conversion_never_reads_keys_or_headers_inside_multiline_path(quo
     assert parsed["max_attachment_mb"] == 25
     assert parsed["sites"]["default"] == {"url": "https://a", "api_key": "k"}
     assert parsed["extra"] == {"url": "nested", "api_key": "nested-key"}
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\u0085"])
+def test_legacy_conversion_unicode_separators_remain_inside_comments(separator):
+    comment = f'# retained{separator}url = "decoy"\n'
+    original = comment + 'url = "https://a"\napi_key = "k"\n'
+    assert tomllib.loads(original) == {"url": "https://a", "api_key": "k"}
+    converted = convert_legacy(original)
+    validate_config_text(converted)
+    assert comment in converted
+    assert tomllib.loads(converted)["sites"]["default"] == {"url": "https://a", "api_key": "k"}
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+@pytest.mark.parametrize("final_newline", [True, False])
+def test_legacy_conversion_preserves_physical_lines_with_optional_final_newline(newline, final_newline):
+    globals_text = (f'# retained{newline}download_dir = "~/keep" # exact{newline}'
+                    f'max_attachment_mb = 25{newline}')
+    fields = f'  url = "https://a"{newline}"api_key" = "k"'
+    if final_newline:
+        fields += newline
+    converted = convert_legacy(globals_text + fields)
+    validate_config_text(converted)
+    assert globals_text in converted
+    assert fields in converted
+    parsed = tomllib.loads(converted)
+    assert parsed["sites"]["default"] == {"url": "https://a", "api_key": "k"}
+    assert parsed["max_attachment_mb"] == 25

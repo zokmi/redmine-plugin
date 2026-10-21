@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+from io import StringIO
 
 from redmine_mcp.config import ConfigError, load_settings
 from redmine_mcp.config_file import LEGACY_SITE_KEYS, structure_config
@@ -394,7 +395,8 @@ def convert_legacy(text: str) -> str:
     moved: list[str] = []
     pending = ""
     at_root = True
-    for line in text.splitlines(keepends=True):
+    # TOML 僅以 LF／CRLF 換行；Unicode 分隔字元在註解內仍是同一行。
+    for line in StringIO(text, newline="\n"):
         pending += line
         try:
             statement = tomllib.loads(pending)
