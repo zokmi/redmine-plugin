@@ -239,9 +239,9 @@ async def test_download_attachment_不同id同檔名不覆蓋(settings, registry
     assert Path(result2["path"]).read_bytes() == b"hello"
 
 
-async def test_下載伺服器錯誤時不影響既有同名檔案(settings, registry):
+async def test_下載伺服器錯誤時不影響既有同名檔案(settings, registry, tmp_path):
     """重試下載同一附件時剛好遇到 Redmine 5xx，不應波及先前已成功下載的檔案。"""
-    site_dir = settings.download_dir / "default"
+    site_dir = tmp_path / "untouched-originals"
     site_dir.mkdir()
     existing_path = site_dir / "5_big.bin"
     existing_path.write_bytes(b"previously downloaded content")
@@ -266,9 +266,9 @@ async def test_下載伺服器錯誤時不影響既有同名檔案(settings, reg
     assert list(site_dir.iterdir()) == [existing_path]
 
 
-async def test_下載超過大小上限時不影響既有同名檔案(settings, registry):
+async def test_下載超過大小上限時不影響既有同名檔案(settings, registry, tmp_path):
     """重試下載同一附件時剛好超過大小上限，不應波及先前已成功下載的檔案。"""
-    site_dir = settings.download_dir / "default"
+    site_dir = tmp_path / "untouched-originals"
     site_dir.mkdir()
     existing_path = site_dir / "5_big.bin"
     existing_path.write_bytes(b"previously downloaded content")
@@ -296,7 +296,7 @@ async def test_下載超過大小上限時不影響既有同名檔案(settings, 
 async def test_未設定目錄時自動下載且重下載隔離(attachment_root):
     site_settings = SiteSettings(
         name="default", url=BASE_URL, api_key="k", description=None,
-        download_dir=None, upload_dir=None, max_attachment_bytes=1024,
+        max_attachment_bytes=1024,
     )
     sites = SiteRegistry(Settings(sites={"default": site_settings}),
                          transports={"default": httpx.MockTransport(_attachment_handler("a.txt", b"ok"))})
@@ -362,7 +362,7 @@ async def test_不同站台的同_id_附件不互相覆蓋(make_registry):
     assert Path(first["path"]) != Path(second["path"])
 
 
-async def test_多站命中時拒絕下載並列出站台(settings, make_registry):
+async def test_多站命中時拒絕下載並列出站台(settings, make_registry, attachment_root):
     sites = make_registry(
         {
             "main": _attachment_handler("a.pdf", b"AAA"),
@@ -382,7 +382,7 @@ async def test_多站命中時拒絕下載並列出站台(settings, make_registr
     assert "client-b" in message
     assert "site" in message
     # 拒絕須發生在建目錄與寫檔之前，不可留下任何半途寫入的檔案。
-    assert list(settings.download_dir.rglob("*")) == []
+    assert list(attachment_root.rglob("*")) == []
 
 
 async def test_無站命中時回報找不到(make_registry):

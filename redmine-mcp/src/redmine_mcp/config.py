@@ -6,7 +6,6 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from urllib.parse import urlparse
 
 DEFAULT_MAX_ATTACHMENT_MB = 10
@@ -14,8 +13,7 @@ DEFAULT_MAX_ATTACHMENT_MB = 10
 #: 舊格式（扁平）參數檔轉換後的站台名稱。
 LEGACY_SITE_NAME = "default"
 
-#: 站台名稱規則。這是安全邊界而非格式偏好：名稱會直接作為下載子目錄名，
-#: 一個名為 ".." 的站台即構成路徑穿越。性質等同 projects.py 的 validate_identifier()。
+#: 站台名稱規則；維持既有識別碼限制，附件儲存另依網址隔離。
 _SITE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 logger = logging.getLogger(__name__)
@@ -46,12 +44,10 @@ class SiteSettings:
     """單一 Redmine 站台的執行期設定。
 
     屬性:
-        name: 站台代號，同時作為下載子目錄名，已通過名稱規則驗證。
+        name: 站台代號，已通過名稱規則驗證。
         url: 站台根位址，已去除結尾斜線。
         api_key: 該站台的 API key，僅供組裝認證 header 使用。
         description: 站台說明；供模型把口語對應到站台代號，未設定時為 None。
-        download_dir: 附件下載目錄；為 None 時該站台停用下載。
-        upload_dir: 允許上傳的來源目錄；為 None 時該站台停用上傳。
         max_attachment_bytes: 單一附件下載／上傳大小上限（位元組）。
     """
 
@@ -59,8 +55,6 @@ class SiteSettings:
     url: str
     api_key: str
     description: str | None
-    download_dir: Path | None
-    upload_dir: Path | None
     max_attachment_bytes: int
 
 
@@ -73,12 +67,6 @@ class Settings:
     """
 
     sites: Mapping[str, SiteSettings]
-
-
-def _optional_dir(value: str | None) -> Path | None:
-    """把目錄設定轉成絕對路徑，空值回傳 None。"""
-    cleaned = (value or "").strip()
-    return Path(cleaned).expanduser().resolve() if cleaned else None
 
 
 def _max_bytes(value: str | None, where: str) -> int:
@@ -105,7 +93,7 @@ def _validate_site_name(name: str) -> str:
     if not _SITE_NAME_PATTERN.match(name):
         raise ConfigError(
             f"站台名稱 {name!r} 不合法：只能用英文、數字、減號與底線，"
-            "需以英數開頭且長度 1–64。站台名稱會作為下載子目錄名，因此規則從嚴"
+            "需以英數開頭且長度 1–64。"
         )
     return name
 
@@ -153,11 +141,6 @@ def _build_site(name: str, values: Mapping[str, str], defaults: Mapping[str, str
         value = values.get(key)
         return value if (value or "").strip() else defaults.get(key)
 
-    download_dir = _optional_dir(pick("download_dir"))
-    # 上傳來源目錄未設定時沿用下載目錄，讓「下載→修改→上傳」的常見流程免除額外設定；
-    # 兩者都沒設定時上傳工具停用，避免模型能把本機任意路徑（例如金鑰檔）送到 Redmine。
-    upload_dir = _optional_dir(pick("upload_dir")) or download_dir
-
     description = (values.get("description") or "").strip() or None
 
     return SiteSettings(
@@ -165,8 +148,6 @@ def _build_site(name: str, values: Mapping[str, str], defaults: Mapping[str, str
         url=raw_url.rstrip("/"),
         api_key=api_key,
         description=description,
-        download_dir=download_dir,
-        upload_dir=upload_dir,
         max_attachment_bytes=_max_bytes(pick("max_attachment_mb"), where),
     )
 
@@ -185,11 +166,21 @@ def load_settings(raw: RawConfig | None = None, env: Mapping[str, str] | None = 
     source = os.environ if env is None else env
     config = raw if raw is not None else RawConfig(globals={}, sites={})
 
+    # 僅辨識舊鍵名稱；絕不展開、存取或遷移其路徑。
+    legacy_keys = {"download_dir", "upload_dir"}
+    obsolete = set(config.globals) & legacy_keys
+    for values in config.sites.values():
+        obsolete.update(set(values) & legacy_keys)
+    obsolete.update(
+        name for name in ("REDMINE_DOWNLOAD_DIR", "REDMINE_UPLOAD_DIR") if name in source
+    )
+    if obsolete:
+        logger.warning("附件已改為自動管理，已忽略舊設定：%s；舊目錄與檔案不會遷移或清理",
+                       "、".join(sorted(obsolete)))
+
     # 全域層級：環境變數覆寫參數檔，空白值視為未提供。
     defaults = dict(config.globals)
     for key, env_key in (
-        ("download_dir", "REDMINE_DOWNLOAD_DIR"),
-        ("upload_dir", "REDMINE_UPLOAD_DIR"),
         ("max_attachment_mb", "REDMINE_MAX_ATTACHMENT_MB"),
     ):
         value = (source.get(env_key) or "").strip()

@@ -85,12 +85,15 @@ def resolve_config_path(env: Mapping[str, str] | None = None) -> Path:
     return Path(raw).expanduser() if raw else default_config_path()
 
 
-#: 全域層級允許的鍵。
-GLOBAL_KEYS = frozenset({"download_dir", "upload_dir", "max_attachment_mb"})
+#: 舊附件鍵只供讀取相容，不能列為現行可編輯鍵。
+LEGACY_ATTACHMENT_KEYS = frozenset({"download_dir", "upload_dir"})
+
+#: 現行可編輯的全域鍵；讀檔時另外接受 LEGACY_ATTACHMENT_KEYS。
+GLOBAL_KEYS = frozenset({"max_attachment_mb"})
 
 #: 站台層級允許的鍵。
 SITE_KEYS = frozenset(
-    {"url", "api_key", "description", "download_dir", "upload_dir", "max_attachment_mb"}
+    {"url", "api_key", "description", "max_attachment_mb"}
 )
 
 #: 舊格式（扁平）參數檔中代表站台設定的鍵；出現任何一個即視為舊格式。
@@ -200,9 +203,14 @@ def structure_config(raw: Mapping[str, object], where: str) -> RawConfig:
 
     if sites_table is None:
         if not has_legacy:
-            return RawConfig(globals=_collect(top_level, GLOBAL_KEYS, "參數檔"), sites={})
-        site = _collect(top_level, SITE_KEYS, "參數檔")
-        globals_ = {key: value for key, value in site.items() if key in GLOBAL_KEYS}
+            return RawConfig(
+                globals=_collect(top_level, GLOBAL_KEYS | LEGACY_ATTACHMENT_KEYS, "參數檔"),
+                sites={},
+            )
+        site = _collect(top_level, SITE_KEYS | LEGACY_ATTACHMENT_KEYS, "參數檔")
+        globals_ = {
+            key: value for key, value in site.items() if key in GLOBAL_KEYS | LEGACY_ATTACHMENT_KEYS
+        }
         return RawConfig(globals=globals_, sites={LEGACY_SITE_NAME: site})
 
     if not isinstance(sites_table, dict):
@@ -212,6 +220,8 @@ def structure_config(raw: Mapping[str, object], where: str) -> RawConfig:
     for name, body in sites_table.items():
         if not isinstance(body, dict):
             raise ConfigError(f"{where}的 sites.{name} 必須是表格")
-        sites[name] = _collect(body, SITE_KEYS, f"站台 {name}")
+        sites[name] = _collect(body, SITE_KEYS | LEGACY_ATTACHMENT_KEYS, f"站台 {name}")
 
-    return RawConfig(globals=_collect(top_level, GLOBAL_KEYS, "參數檔"), sites=sites)
+    return RawConfig(
+        globals=_collect(top_level, GLOBAL_KEYS | LEGACY_ATTACHMENT_KEYS, "參數檔"), sites=sites
+    )

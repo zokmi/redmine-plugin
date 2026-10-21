@@ -14,25 +14,17 @@
 
 # ── 全域層級（選填）：各站台未指定時的預設值
 #
-# 兩個目錄都要改成你自己電腦上真實存在的路徑（下面是 Windows 的例子；
-# macOS／Linux 請寫成 /Users/你的帳號/redmine-dl 這種形式）。
+# 附件暫存由系統自動管理，無需設定下載或上傳目錄。
+# 普通檔案可直接用 file_path 上傳；原始檔與舊自訂目錄不會遷移或清理。
+# 暫存閒置滿 7 天壓縮，壓縮完成後保留 30 天再刪除；詳見 SETUP.md。
+# 舊 download_dir / upload_dir 與對應環境變數已忽略，不再具有停用附件功能的語意。
 #
-# download_dir：附件下載的落點。整行留白或整行刪掉 = 停用附件下載。
-# upload_dir  ：允許上傳的來源目錄。它限制模型只能上傳這個目錄裡的檔案，
-#               避免它被單子裡的內容誘導去上傳你電腦上的其他檔案。
-#               留白 = 停用上傳。
-#
-# 兩者都請指向專用目錄，不要填家目錄或桌面：upload_dir 的授權涵蓋它底下
-# 所有子目錄，填家目錄等於整棵目錄樹都可被上傳。
-download_dir = "D:/redmine-downloads"
-upload_dir   = "D:/redmine-uploads"
-
 # 單一附件的大小上限（MB）。
 max_attachment_mb = 10
 
 # ── 站台層級：每個 [sites.<代號>] 是一個 Redmine 站台
 # 代號只能用英文、數字、減號與底線，需以英數開頭，長度 1–64。
-# 它會出現在工具的 site 參數，也會作為下載檔案的子目錄名。
+# 它會出現在工具的 site 參數；附件依站台網址隔離儲存。
 
 [sites.main]
 url     = "https://redmine.example.com/redmine"
@@ -44,7 +36,6 @@ description = "公司正式站"
 # url     = "https://redmine.client-b.com"
 # api_key = "<another-api-key>"
 # description = "客戶 B 的正式站"
-# download_dir = "D:/dl-client-b"      # 選填，覆寫全域設定
 
 # ── 舊格式（仍然支援）
 # 只接一個站台時，可以不寫 [sites.*]，直接把 url 與 api_key 放在最外層，

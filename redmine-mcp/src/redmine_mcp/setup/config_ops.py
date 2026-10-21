@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from redmine_mcp.config import ConfigError
-from redmine_mcp.config_file import GLOBAL_KEYS, structure_config
+from redmine_mcp.config_file import GLOBAL_KEYS, LEGACY_ATTACHMENT_KEYS, structure_config
 from redmine_mcp.errors import RedmineError
 from redmine_mcp.setup import toml_edit
 from redmine_mcp.setup.external import CommandRunner
@@ -281,6 +281,7 @@ def show(prompts: Prompts, *, config_path: Path) -> int:
         f"  {key} = {raw[key]}" if key in raw else f"  {key} =（未設定）"
         for key in sorted(GLOBAL_KEYS)
     ]
+    prompts.say("附件目錄由系統自動管理；舊路徑設定已忽略。")
     prompts.say("全域設定：")
     for line in 全域:
         prompts.say(line)
@@ -481,8 +482,6 @@ def set_global(
     prompts: Prompts,
     *,
     config_path: Path,
-    download_dir: str | None,
-    upload_dir: str | None,
     max_attachment_mb: int | None,
     clear: Sequence[str],
     run: CommandRunner,
@@ -496,8 +495,6 @@ def set_global(
     參數:
         prompts: 互動管道。
         config_path: 參數檔路徑。
-        download_dir: 附件下載目錄；None 代表不改。
-        upload_dir: 允許上傳的來源目錄；None 代表不改。
         max_attachment_mb: 單一附件大小上限（MB）；None 代表不改。
         clear: 要移除的鍵名，必須落在 GLOBAL_KEYS 內。
         run: 外部指令執行器。
@@ -505,6 +502,10 @@ def set_global(
     回傳:
         0 成功；1 使用者取消或可預期的錯誤。
     """
+    if set(clear) & LEGACY_ATTACHMENT_KEYS:
+        prompts.say("[red]×[/red] 附件目錄已改為自動管理，舊路徑鍵不可寫入或清空。")
+        return 1
+
     loaded = load_current(prompts, config_path, need_sites=False)
     if loaded is None:
         return 1
@@ -516,17 +517,13 @@ def set_global(
         return 1
 
     值: dict[str, str | int] = {}
-    if download_dir is not None:
-        值["download_dir"] = download_dir
-    if upload_dir is not None:
-        值["upload_dir"] = upload_dir
     if max_attachment_mb is not None:
         值["max_attachment_mb"] = max_attachment_mb
 
     # 完全不帶旗標時退回互動，與 set-site 一致。
     if not 值 and not clear:
         清空清單: list[str] = []
-        for key in ("download_dir", "upload_dir", "max_attachment_mb"):
+        for key in sorted(GLOBAL_KEYS):
             answer = _ask_optional(prompts, key, str(tomllib.loads(loaded.text).get(key, "")))
             if answer is _KEEP:
                 continue
@@ -552,14 +549,6 @@ def set_global(
             prompts.say("[red]×[/red] max_attachment_mb 必須大於 0。")
             return 1
         值["max_attachment_mb"] = megabytes
-
-    for key in ("download_dir", "upload_dir"):
-        路徑 = 值.get(key)
-        if isinstance(路徑, str) and not Path(路徑).expanduser().is_dir():
-            prompts.say(
-                f"[yellow]![/yellow] {key} 指向的目錄不存在：{路徑}。"
-                "仍會寫入（server 也不檢查存在性），但附件功能要等目錄建立後才能用。"
-            )
 
     changes: list[Change] = [(key, 值[key]) for key in sorted(值)]
     changes += [(key, None) for key in sorted(clear)]

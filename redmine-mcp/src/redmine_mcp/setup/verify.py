@@ -35,8 +35,6 @@ async def verify_credentials(
         url=url.rstrip("/"),
         api_key=api_key,
         description=None,
-        download_dir=None,
-        upload_dir=None,
         max_attachment_bytes=0,
     )
     client = RedmineClient(settings, transport=transport)

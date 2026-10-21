@@ -31,8 +31,8 @@ GIF_BYTES = b"GIF89a" + b"\x01\x00\x01\x00"
 WEBP_BYTES = b"RIFF" + b"\x1a\x00\x00\x00" + b"WEBP" + b"VP8 "
 
 
-async def test_upload_attachment_送出原始位元組並回傳token(settings, registry):
-    source = settings.upload_dir / "測試圖片.png"
+async def test_upload_attachment_送出原始位元組並回傳token(settings, registry, tmp_path):
+    source = tmp_path / "測試圖片.png"
     source.write_bytes(PNG_BYTES)
     seen: dict = {}
 
@@ -77,7 +77,7 @@ async def test_upload_attachment_直接上傳外部檔案(registry, tmp_path_fac
     assert not attachment_root.exists()
 
 
-async def test_upload_attachment_不存在的來源被拒絕(settings, registry):
+async def test_upload_attachment_不存在的來源被拒絕(settings, registry, tmp_path):
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -89,15 +89,15 @@ async def test_upload_attachment_不存在的來源被拒絕(settings, registry)
 
     with pytest.raises(Exception):
         await _call(
-            mcp, "upload_attachment", {"file_path": str(settings.upload_dir / "missing.txt")}
+            mcp, "upload_attachment", {"file_path": str(tmp_path / "missing.txt")}
         )
     await sites.aclose()
 
     assert calls == []
 
 
-async def test_upload_attachment_超過大小上限被拒絕(settings, registry):
-    source = settings.upload_dir / "big.bin"
+async def test_upload_attachment_超過大小上限被拒絕(settings, registry, tmp_path):
+    source = tmp_path / "big.bin"
     source.write_bytes(b"x" * (settings.max_attachment_bytes + 1))
     calls: list[str] = []
 
@@ -116,8 +116,8 @@ async def test_upload_attachment_超過大小上限被拒絕(settings, registry)
     assert calls == []
 
 
-async def test_upload_attachment_空檔案被拒絕(settings, registry):
-    source = settings.upload_dir / "empty.png"
+async def test_upload_attachment_空檔案被拒絕(settings, registry, tmp_path):
+    source = tmp_path / "empty.png"
     source.write_bytes(b"")
     sites = registry(lambda r: json_response(201, {}))
     mcp = create_server(sites)
@@ -134,7 +134,7 @@ async def test_未設定目錄時可上傳檔案(tmp_path):
     source.write_bytes(b"direct upload")
     site_settings = SiteSettings(
         name="default", url=BASE_URL, api_key="k", description=None,
-        download_dir=None, upload_dir=None, max_attachment_bytes=1024,
+        max_attachment_bytes=1024,
     )
     seen = []
 
@@ -151,8 +151,8 @@ async def test_未設定目錄時可上傳檔案(tmp_path):
     assert source.read_bytes() == b"direct upload"
 
 
-async def test_Redmine未回傳token時視為失敗(settings, registry):
-    source = settings.upload_dir / "a.png"
+async def test_Redmine未回傳token時視為失敗(settings, registry, tmp_path):
+    source = tmp_path / "a.png"
     source.write_bytes(PNG_BYTES)
     sites = registry(lambda r: json_response(201, {}))
     mcp = create_server(sites)
@@ -503,8 +503,8 @@ async def test_upload_attachment_base64未給檔名時自動命名(settings, reg
     assert result["filename"] == "attachment.png"
 
 
-async def test_upload_attachment_兩種輸入都給被拒絕(settings, registry):
-    source = settings.upload_dir / "圖.png"
+async def test_upload_attachment_兩種輸入都給被拒絕(settings, registry, tmp_path):
+    source = tmp_path / "圖.png"
     source.write_bytes(PNG_BYTES)
     calls: list[str] = []
 
@@ -615,7 +615,7 @@ async def test_base64上傳多站台時未指定站台會被拒絕(make_registry
 async def test_未設定目錄時base64圖片不落地(attachment_root):
     site_settings = SiteSettings(
         name="default", url=BASE_URL, api_key="k", description=None,
-        download_dir=None, upload_dir=None, max_attachment_bytes=1024,
+        max_attachment_bytes=1024,
     )
     seen = []
 
@@ -641,9 +641,9 @@ def test_safe_upload_filename_移除角括號(tmp_path):
     )
 
 
-async def test_上傳圖片回傳現成的內嵌語法(settings, registry):
+async def test_上傳圖片回傳現成的內嵌語法(settings, registry, tmp_path):
     # 寫入工具會自動補引用，但呼叫端想自己決定圖片位置時，得有一份現成語法可貼。
-    source = settings.upload_dir / "shot.png"
+    source = tmp_path / "shot.png"
     source.write_bytes(PNG_BYTES)
     sites = registry(lambda r: json_response(201, {"upload": {"token": "7167.abc"}}))
     mcp = create_server(sites)
@@ -653,9 +653,9 @@ async def test_上傳圖片回傳現成的內嵌語法(settings, registry):
     assert result["markdown"] == "![](shot.png)"
 
 
-async def test_上傳非圖片不給內嵌語法(settings, registry):
+async def test_上傳非圖片不給內嵌語法(settings, registry, tmp_path):
     # 對 PDF 之類的附件給 ![]() 只會產生一行破圖。
-    source = settings.upload_dir / "spec.pdf"
+    source = tmp_path / "spec.pdf"
     source.write_bytes(b"%PDF-1.4 test")
     sites = registry(lambda r: json_response(201, {"upload": {"token": "7167.abc"}}))
     mcp = create_server(sites)

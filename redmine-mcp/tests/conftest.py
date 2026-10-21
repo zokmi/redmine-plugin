@@ -16,14 +16,12 @@ BASE_URL = "https://redmine.example.com"
 
 @pytest.fixture
 def settings(tmp_path) -> SiteSettings:
-    """指向假站台的單站設定，下載與上傳目錄都使用 tmp_path。"""
+    """指向假站台的單站設定；附件根目錄由 attachment_root fixture 隔離。"""
     return SiteSettings(
         name="default",
         url=BASE_URL,
         api_key="test-key",
         description=None,
-        download_dir=tmp_path,
-        upload_dir=tmp_path,
         max_attachment_bytes=1024,
     )
 
@@ -72,7 +70,7 @@ def make_registry(settings) -> Callable[..., SiteRegistry]:
     """以站台名稱 → handler 的對照表建立 SiteRegistry 的工廠。
 
     每站各自一份 MockTransport，測試才能讓不同站台回傳不同結果。
-    未指定 handler 的站台沿用 settings fixture 的目錄與大小上限設定。
+    未指定 handler 的站台沿用 settings fixture 的大小上限設定。
     """
 
     def factory(handlers: dict[str, Callable[[httpx.Request], httpx.Response]]) -> SiteRegistry:

@@ -119,16 +119,16 @@ def test_解析得到站台卻定位不到就拋出而非靜默附加():
 
 
 def test_新檔含說明註解與站台區塊():
-    text = render_new_config('[sites.main]\nurl = "https://a/b"\n', None, None)
+    text = render_new_config('[sites.main]\nurl = "https://a/b"\n')
     assert text.startswith("#")
     assert '[sites.main]' in text
     assert "download_dir" not in text
 
 
-def test_新檔帶下載與上傳目錄():
-    text = render_new_config("[sites.main]\n", "D:/dl", "D:/up")
-    assert 'download_dir = "D:/dl"' in text
-    assert 'upload_dir   = "D:/up"' in text
+def test_新檔不生成下載與上傳路徑():
+    text = render_new_config("[sites.main]\n")
+    assert "download_dir" not in text
+    assert "upload_dir" not in text
 
 
 def test_舊格式轉成_sites_default_並保留全域鍵():
@@ -392,3 +392,14 @@ def test_set_key_in_值內含井號不被當成註解():
     assert "# 舊金鑰" in result2
     assert 'api_key = "new"' in result2
     assert "a#b" not in result2
+
+
+def test_legacy_conversion_preserves_paths_spelling_and_limit():
+    text = ('download_dir = "~/old" # retained\n'
+            "upload_dir = '~/other'\nmax_attachment_mb = 25\n"
+            'url = "https://a"\napi_key = "k"\n')
+    result = convert_legacy(text)
+    assert 'download_dir = "~/old" # retained' in result
+    assert "upload_dir = '~/other'" in result
+    assert "max_attachment_mb = 25" in result
+    validate_config_text(result)

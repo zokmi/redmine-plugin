@@ -122,8 +122,8 @@ _CLEAR_OPTION = typer.Option((), "--clear", help="要移除的全域鍵，可重
 
 @config_app.command("set-global")
 def config_set_global(
-    download_dir: str | None = typer.Option(None, "--download-dir", help="附件下載目錄"),
-    upload_dir: str | None = typer.Option(None, "--upload-dir", help="允許上傳的來源目錄"),
+    download_dir: str | None = typer.Option(None, "--download-dir", hidden=True),
+    upload_dir: str | None = typer.Option(None, "--upload-dir", hidden=True),
     max_attachment_mb: int | None = typer.Option(
         None, "--max-attachment-mb", help="單一附件大小上限（MB，需大於 0）"
     ),
@@ -135,12 +135,13 @@ def config_set_global(
     from redmine_mcp.setup import config_ops, wizard
     from redmine_mcp.setup.external import run_command
 
+    if download_dir is not None or upload_dir is not None:
+        typer.echo("附件目錄已改為自動管理，舊路徑選項不可再設定。", err=True)
+        raise typer.Exit(1)
     raise typer.Exit(
         config_ops.set_global(
             wizard.console_prompts(),
             config_path=resolve_config_path(),
-            download_dir=download_dir,
-            upload_dir=upload_dir,
             max_attachment_mb=max_attachment_mb,
             clear=clear,
             run=run_command,

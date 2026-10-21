@@ -97,7 +97,7 @@ def test_全新安裝寫出參數檔並註冊(tmp_path):
     target = tmp_path / "config.toml"
     # 問憑證提前到問代號之前（推導代號需要網址），因此答案順序是網址、金鑰、代號。
     script = 腳本化提問(
-        answers=["https://a/redmine", "secret-key-1234", "main", "", "", ""],
+        answers=["https://a/redmine", "secret-key-1234", "main", ""],
         confirms=[True, True],  # 確認寫入、確認註冊（位置確認已移除，不再問）
         choices=[],
     )
@@ -127,7 +127,7 @@ def test_金鑰只以末四碼回顯(tmp_path):
     # 那一步就會提早 return，不會再消耗任何 confirm；位置確認已移除，confirms 只需
     # 覆蓋「確認寫入」一題。
     script = 腳本化提問(
-        answers=["https://a/redmine", "secret-key-1234", "main", "", "", ""],
+        answers=["https://a/redmine", "secret-key-1234", "main", ""],
         confirms=[True],
         choices=[],
     )
@@ -150,7 +150,7 @@ def test_金鑰只以末四碼回顯(tmp_path):
 def test_不確認寫入就不建立檔案(tmp_path):
     target = tmp_path / "config.toml"
     script = 腳本化提問(
-        answers=["https://a/redmine", "secret-key-1234", "main", "", "", ""],
+        answers=["https://a/redmine", "secret-key-1234", "main", ""],
         confirms=[False],  # 位置確認已移除；剩下的唯一一題是「確認寫入嗎？」
         choices=[],
     )
@@ -197,7 +197,7 @@ def test_取代既有站台不影響其他站台(tmp_path):
     )
     content = target.read_text(encoding="utf-8")
     assert code == 0
-    assert 'api_key     = "new-key-9999"' in content
+    assert 'api_key = "new-key-9999"' in content
     assert 'api_key = "keep"' in content
     # 舊金鑰必須真的被替換掉，不是退化成「附加而非替換」。
     assert '"old"' not in content
@@ -243,7 +243,7 @@ def test_取代既有站台且沿用原金鑰時不呼叫_ask_secret(tmp_path):
     content = target.read_text(encoding="utf-8")
     assert code == 0
     assert ask_secret_呼叫次數["count"] == 0, "答『不換』時不該呼叫 ask_secret"
-    assert 'api_key     = "old-key-1234"' in content
+    assert 'api_key = "old-key-1234"' in content
     script.assert_exhausted()
 
 
@@ -272,7 +272,7 @@ def test_取代既有站台且金鑰驗不過時直接要求輸入新金鑰不�
     )
     content = target.read_text(encoding="utf-8")
     assert code == 0
-    assert 'api_key     = "brand-new-key"' in content
+    assert 'api_key = "brand-new-key"' in content
     全部輸出 = "\n".join(script.said)
     assert "要換一把新的金鑰嗎" not in 全部輸出
     assert "驗證失敗" in 全部輸出
@@ -321,7 +321,7 @@ def test_取代既有站台時網址帶預設值直接Enter就沿用(tmp_path):
     assert code == 0
     assert 收到的預設值 == ["https://a.example.com/redmine"]
     content = target.read_text(encoding="utf-8")
-    assert 'url         = "https://a.example.com/redmine"' in content
+    assert 'url = "https://a.example.com/redmine"' in content
 
 
 def test_舊格式不同意轉換就完全不動檔案(tmp_path):
@@ -373,7 +373,7 @@ def test_既有全域設定不被覆蓋也不被詢問(tmp_path):
     assert "[sites.new]" in content
     assert 'api_key     = "new-key"' in content
     全部輸出 = "\n".join(script.said)
-    assert "既有參數檔的全域設定" in 全部輸出
+    assert "自動管理" in 全部輸出
     script.assert_exhausted()
 
 
@@ -482,7 +482,7 @@ def test_權限收緊失敗會提示使用者(tmp_path):
         return CommandResult(1, "", "")
 
     script = 腳本化提問(
-        answers=["https://a/x", "secret1234", "main", "", "", ""],
+        answers=["https://a/x", "secret1234", "main", ""],
         confirms=[True],  # 位置確認已移除，只剩「確認寫入嗎？」
         choices=[],
     )
@@ -532,7 +532,7 @@ def test_寫入失敗會回報而不是丟出例外(tmp_path, monkeypatch):
 
     target = tmp_path / "config.toml"
     script = 腳本化提問(
-        answers=["https://a/x", "secret1234", "main", "", "", ""],
+        answers=["https://a/x", "secret1234", "main", ""],
         confirms=[True],  # 位置確認已移除，只剩「確認寫入嗎？」
         choices=[],
     )
@@ -927,6 +927,8 @@ def test_bundle_模式只問兩題(tmp_path):
     assert len(問過) == 1, f"只該問網址一題，實際問了：{問過}"
     assert len(金鑰問過) == 1
     assert 開過 == ["https://redmine.example.com/redmine/my/account"]
+    content = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "download_dir" not in content and "upload_dir" not in content
 
 
 def test_bundle_模式的代號由網址推導並寫進檔案(tmp_path):
@@ -1021,7 +1023,7 @@ def test_bundle_模式只有一個既有站台時金鑰驗得過可直接沿用(
     content = 設定檔.read_text(encoding="utf-8")
     assert code == 0
     assert ask_secret_呼叫次數["count"] == 0
-    assert 'api_key     = "old-key-1234"' in content
+    assert 'api_key = "old-key-1234"' in content
 
 
 def _換網址情境的_prompts(
@@ -1089,8 +1091,8 @@ def test_bundle_模式換網址時代號不同會跳出選擇並可選取代(tmp
     assert content.count("[sites.") == 1
     assert "[sites.main]" in content
     assert "[sites.new-host]" not in content
-    assert 'url         = "https://redmine.new-host.com/redmine"' in content
-    assert 'api_key     = "brand-new-key"' in content
+    assert 'url = "https://redmine.new-host.com/redmine"' in content
+    assert 'api_key = "brand-new-key"' in content
     assert "old-key-1234" not in content
 
 
@@ -1323,7 +1325,7 @@ def test_bundle_模式多站要修改時讓人點要改哪一個(tmp_path):
     assert 選項記錄, "多站時要讓使用者點要改哪一個"
     assert "main" in 選項記錄[0] and "new" in 選項記錄[0]
     assert 預設記錄 == ["https://redmine.example.com/redmine"], "網址要帶選中那站的現值"
-    assert 'api_key     = "main-key-1234"' in 設定檔.read_text(encoding="utf-8")
+    assert 'api_key = "main-key-1234"' in 設定檔.read_text(encoding="utf-8")
 
 
 # --- 方向鍵選單（單選／多選） -------------------------------------------------
@@ -1719,3 +1721,31 @@ def test_遮罩輸入的金鑰不會被寫進紀錄檔(tmp_path, monkeypatch):
     內容 = 紀錄檔.read_text(encoding="utf-8")
     assert "請貼上 API 金鑰" in 內容
     assert "s3cret-key" not in 內容
+
+
+def test_new_setup_never_asks_or_generates_attachment_paths(tmp_path):
+    target = tmp_path / "config.toml"
+    script = 腳本化提問(answers=["https://a/redmine", "key", "main", ""],
+                         confirms=[True], choices=[])
+    assert run_setup(script.build(), config_path=target, run=_固定回應(0),
+                     verify=_成功驗證, finish=False) == 0
+    script.assert_exhausted()
+    assert not any("目錄" in label for label in script.labels)
+    assert "自動管理" in "\n".join(script.said)
+    content = target.read_text(encoding="utf-8")
+    assert "download_dir" not in content and "upload_dir" not in content
+
+
+def test_setup_replacing_site_keeps_legacy_path_text(tmp_path):
+    target = tmp_path / "config.toml"
+    target.write_text('[sites.main]\nurl = "https://a"\napi_key = "old"\n'
+                      "download_dir = '~/old-download' # untouched\n"
+                      'upload_dir = "~/old-upload"\nunknown_field = "keep"\n', encoding="utf-8")
+    script = 腳本化提問(answers=["https://new", "new-key", ""],
+                         confirms=[True, True], choices=[1, 0])
+    assert run_setup(script.build(), config_path=target, run=_固定回應(0),
+                     verify=_成功驗證, finish=False) == 0
+    content = target.read_text(encoding="utf-8")
+    assert "download_dir = '~/old-download' # untouched" in content
+    assert 'upload_dir = "~/old-upload"' in content
+    assert 'unknown_field = "keep"' in content

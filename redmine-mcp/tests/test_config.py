@@ -28,8 +28,8 @@ def test_網址結尾斜線會被去除():
     assert settings.sites["default"].url == "https://a.example.com/redmine"
 
 
-def test_未設定下載目錄時為_None():
-    assert load_settings(env=BASE_ENV).sites["default"].download_dir is None
+def test_執行期不再包含下載目錄設定():
+    assert not hasattr(load_settings(env=BASE_ENV).sites["default"], "download_dir")
 
 
 def test_附件上限預設為十MB():
@@ -41,14 +41,14 @@ def test_附件上限可由環境變數覆寫():
     assert settings.sites["default"].max_attachment_bytes == 3 * 1024 * 1024
 
 
-def test_上傳目錄未設定時沿用下載目錄(tmp_path: Path):
+def test_舊下載目錄環境變數不再建立上傳目錄(tmp_path: Path):
     settings = load_settings(env={**BASE_ENV, "REDMINE_DOWNLOAD_DIR": str(tmp_path)})
     site = settings.sites["default"]
-    assert site.upload_dir == tmp_path.resolve()
+    assert not hasattr(site, "upload_dir")
 
 
-def test_兩個目錄都未設定時上傳目錄為_None():
-    assert load_settings(env=BASE_ENV).sites["default"].upload_dir is None
+def test_執行期不再包含上傳目錄設定():
+    assert not hasattr(load_settings(env=BASE_ENV).sites["default"], "upload_dir")
 
 
 @pytest.mark.parametrize("bad", ["", "   ", "ftp://a.example.com", "redmine.example.com"])
@@ -110,9 +110,9 @@ def test_站台層級設定覆寫全域層級(tmp_path: Path):
         globals_={"download_dir": str(tmp_path), "max_attachment_mb": "10"},
     )
     settings = load_settings(raw, env={})
-    assert settings.sites["main"].download_dir == tmp_path.resolve()
+    assert not hasattr(settings.sites["main"], "download_dir")
     assert settings.sites["main"].max_attachment_bytes == 10 * 1024 * 1024
-    assert settings.sites["client-b"].download_dir == site_dir.resolve()
+    assert not hasattr(settings.sites["client-b"], "download_dir")
     assert settings.sites["client-b"].max_attachment_bytes == 50 * 1024 * 1024
 
 
@@ -151,13 +151,13 @@ def test_站台層級空白環境變數不覆寫參數檔既有的網址():
     assert settings.sites["main"].url == "https://a.example.com"
 
 
-def test_全域層級空白環境變數不覆寫參數檔既有的下載目錄(tmp_path: Path):
+def test_舊參數檔與空白環境變數下載目錄均忽略(tmp_path: Path):
     raw = _raw(
         {"main": {"url": "https://a.example.com", "api_key": "ka"}},
         globals_={"download_dir": str(tmp_path)},
     )
     settings = load_settings(raw, env={"REDMINE_DOWNLOAD_DIR": "   "})
-    assert settings.sites["main"].download_dir == tmp_path.resolve()
+    assert not hasattr(settings.sites["main"], "download_dir")
 
 
 def test_多站台時環境變數不覆寫站台設定並記警告(caplog: pytest.LogCaptureFixture):
@@ -190,7 +190,7 @@ def test_多站台時環境變數的警告不含金鑰值(caplog: pytest.LogCapt
     assert "super-secret-value" not in caplog.text
 
 
-def test_全域目錄環境變數在多站台時仍然生效(tmp_path: Path):
+def test_舊全域目錄環境變數在多站台時忽略(tmp_path: Path):
     raw = _raw(
         {
             "main": {"url": "https://a.example.com", "api_key": "ka"},
@@ -198,10 +198,28 @@ def test_全域目錄環境變數在多站台時仍然生效(tmp_path: Path):
         }
     )
     settings = load_settings(raw, env={"REDMINE_DOWNLOAD_DIR": str(tmp_path)})
-    assert settings.sites["main"].download_dir == tmp_path.resolve()
-    assert settings.sites["client-b"].download_dir == tmp_path.resolve()
+    assert not hasattr(settings.sites["main"], "download_dir")
+    assert not hasattr(settings.sites["client-b"], "download_dir")
 
 
 def test_站台說明會被保留():
     raw = _raw({"main": {"url": "https://a.example.com", "api_key": "ka", "description": "正式站"}})
     assert load_settings(raw, env={}).sites["main"].description == "正式站"
+
+
+def test_legacy_paths_ignored_and_warning_aggregated_without_access(monkeypatch, caplog):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("legacy paths must never be expanded or accessed")
+    monkeypatch.setattr(Path, "expanduser", forbidden)
+    monkeypatch.setattr(Path, "resolve", forbidden)
+    raw = _raw({"main": {"url": "https://a", "api_key": "k", "upload_dir": "~/site-secret"}},
+               {"download_dir": "~/global-secret"})
+    settings = load_settings(raw, env={"REDMINE_DOWNLOAD_DIR": "~/env-secret",
+                                       "REDMINE_UPLOAD_DIR": ""})
+    assert not hasattr(settings.sites["main"], "download_dir")
+    assert not hasattr(settings.sites["main"], "upload_dir")
+    assert len(caplog.records) == 1
+    for name in ("download_dir", "upload_dir", "REDMINE_DOWNLOAD_DIR", "REDMINE_UPLOAD_DIR"):
+        assert name in caplog.text
+    assert "secret" not in caplog.text
+    assert "自動管理" in caplog.text

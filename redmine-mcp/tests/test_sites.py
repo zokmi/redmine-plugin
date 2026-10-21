@@ -20,8 +20,6 @@ def _site(name: str, host: str) -> SiteSettings:
         url=f"https://{host}",
         api_key=f"key-{name}",
         description=None,
-        download_dir=None,
-        upload_dir=None,
         max_attachment_bytes=1024,
     )
 

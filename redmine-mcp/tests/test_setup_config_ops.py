@@ -231,7 +231,7 @@ def test_show_列出站台並遮罩金鑰(tmp_path):
     assert "https://a/redmine" in 全部輸出
     assert "****cdef" in 全部輸出
     assert "0123456789abcdef" not in 全部輸出
-    assert "D:/dl" in 全部輸出
+    assert "D:/dl" not in 全部輸出
     script.assert_exhausted()
 
 
@@ -706,8 +706,6 @@ def test_刪除不存在的站台會列出現有代號(tmp_path):
 
 def _set_global(script, target, **kwargs):
     參數 = {
-        "download_dir": None,
-        "upload_dir": None,
         "max_attachment_mb": None,
         "clear": [],
         "run": _成功執行,
@@ -717,32 +715,31 @@ def _set_global(script, target, **kwargs):
     return config_ops.set_global(script.build(), config_path=target, **參數)
 
 
-def test_設定下載目錄(tmp_path):
+def test_current_global_update_preserves_old_paths_and_files(tmp_path):
     target = _寫好一個站台(tmp_path)
-    存在的目錄 = tmp_path / "dl"
-    存在的目錄.mkdir()
+    old_dir = tmp_path / "originals"
+    old_dir.mkdir()
+    original = old_dir / "keep.txt"
+    original.write_text("keep", encoding="utf-8")
+    old_line = f'download_dir = "{old_dir.as_posix()}"'
+    old_text = target.read_text(encoding="utf-8").replace('download_dir = "D:/dl"', old_line)
+    old_text += 'upload_dir = "~/private-site" # keep exactly\n'
+    target.write_text(old_text, encoding="utf-8")
     script = 腳本化提問(answers=[], confirms=[], choices=[])
-
-    code = _set_global(script, target, download_dir=str(存在的目錄))
-
-    assert code == 0
-    # 不比字面子字串（同時容許逸出與未逸出兩種形式的斷言幾乎恆真），改驗真正的
-    # 契約：server 用 tomllib 讀回來的值必須等於使用者輸入的值，逸出／解逸出是否
-    # 對稱由這個往返自然驗證，且跨平台一致。
-    寫入值 = tomllib.loads(target.read_text(encoding="utf-8"))["download_dir"]
-    assert 寫入值 == str(存在的目錄)
+    assert _set_global(script, target, max_attachment_mb=25) == 0
+    content = target.read_text(encoding="utf-8")
+    assert old_line in content
+    assert 'upload_dir = "~/private-site" # keep exactly' in content
+    assert original.read_text(encoding="utf-8") == "keep"
 
 
-def test_目錄不存在時警告但仍寫入(tmp_path):
-    # server 端不檢查目錄存在性，這裡拒絕寫入會與實際行為不一致。
+def test_show_omits_legacy_path_values(tmp_path):
     target = _寫好一個站台(tmp_path)
     script = 腳本化提問(answers=[], confirms=[], choices=[])
-
-    code = _set_global(script, target, download_dir=str(tmp_path / "還沒建"))
-
-    assert code == 0
-    assert "不存在" in "\n".join(script.said)
-    assert "還沒建" in target.read_text(encoding="utf-8")
+    assert config_ops.show(script.build(), config_path=target) == 0
+    output = "\n".join(script.said)
+    assert "D:/dl" not in output
+    assert "自動管理" in output
 
 
 def test_附件上限寫成裸整數(tmp_path):
@@ -766,14 +763,13 @@ def test_附件上限必須大於零(tmp_path):
     assert "max_attachment_mb" not in target.read_text(encoding="utf-8")
 
 
-def test_清空全域鍵(tmp_path):
+def test_retired_global_key_cannot_be_cleared(tmp_path):
     target = _寫好一個站台(tmp_path)
+    original = target.read_bytes()
     script = 腳本化提問(answers=[], confirms=[], choices=[])
-
-    code = _set_global(script, target, clear=["download_dir"])
-
-    assert code == 0
-    assert "download_dir" not in target.read_text(encoding="utf-8")
+    assert _set_global(script, target, clear=["download_dir"]) == 1
+    assert "自動管理" in "\n".join(script.said)
+    assert target.read_bytes() == original
 
 
 def test_清空未知鍵時列出可用鍵(tmp_path):
@@ -784,15 +780,15 @@ def test_清空未知鍵時列出可用鍵(tmp_path):
 
     assert code == 1
     全部輸出 = "\n".join(script.said)
-    assert "download_dir" in 全部輸出
-    assert "upload_dir" in 全部輸出
+    assert "max_attachment_mb" in 全部輸出
+    assert "download_dir" not in 全部輸出
 
 
 def test_同一鍵不可同時設定與清空(tmp_path):
     target = _寫好一個站台(tmp_path)
     script = 腳本化提問(answers=[], confirms=[], choices=[])
 
-    code = _set_global(script, target, download_dir="D:/dl", clear=["download_dir"])
+    code = _set_global(script, target, max_attachment_mb=25, clear=["max_attachment_mb"])
 
     assert code == 1
     assert "同時" in "\n".join(script.said)
@@ -823,19 +819,18 @@ def test_跨命令連續編輯後版面與鍵值仍然正確(tmp_path):
     block_main = toml_edit.render_site_block(
         "main", "https://a/redmine", "aaaa1111aaaa", "公司正式站"
     )
-    text = toml_edit.render_new_config(block_main, "D:/dl", None)
+    text = toml_edit.render_new_config(block_main)
     block_other = toml_edit.render_site_block("other", "https://b/redmine", "bbbb2222bbbb", None)
     text = toml_edit.upsert_site_block(text, "other", block_other)
     target.write_text(text, encoding="utf-8")
 
     無提問 = 腳本化提問(answers=[], confirms=[], choices=[])
 
-    # 步驟一：set-global 在區間尾端插鍵（原本只有 download_dir 一個全域鍵）。
-    code = _set_global(無提問, target, upload_dir="D:/up")
+    # 步驟一：set-global 在區間尾端插入附件大小上限。
+    code = _set_global(無提問, target, max_attachment_mb=25)
     assert code == 0
     設定 = tomllib.loads(target.read_text(encoding="utf-8"))
-    assert 設定["download_dir"] == "D:/dl"
-    assert 設定["upload_dir"] == "D:/up"
+    assert 設定["max_attachment_mb"] == 25
 
     # 步驟二：set-site 就地換 main 的網址，要保留原本的對齊空白，且不能動到 other。
     code = _set_site(無提問, target, site="main", url="https://new-main/redmine")
@@ -847,12 +842,11 @@ def test_跨命令連續編輯後版面與鍵值仍然正確(tmp_path):
     內容 = target.read_text(encoding="utf-8")
     assert 'url         = "https://new-main/redmine"' in 內容  # 對齊空白仍在
 
-    # 步驟三：set-global 清空 download_dir（刪除區間中段的一個鍵）。
-    code = _set_global(無提問, target, clear=["download_dir"])
+    # 步驟三：set-global 清空 max_attachment_mb。
+    code = _set_global(無提問, target, clear=["max_attachment_mb"])
     assert code == 0
     設定 = tomllib.loads(target.read_text(encoding="utf-8"))
-    assert "download_dir" not in 設定
-    assert 設定["upload_dir"] == "D:/up"
+    assert "max_attachment_mb" not in 設定
 
     # 步驟四：再對 main 換一次說明，確認前面的編輯沒有讓區塊定位跑掉。
     code = _set_site(無提問, target, site="main", description="換過的說明")
@@ -874,18 +868,13 @@ def test_跨命令連續編輯後版面與鍵值仍然正確(tmp_path):
     assert not 最終內容.endswith("\n\n")  # 尾端換行有收斂，沒有累積空白
 
 
-def test_不帶任何旗標時逐項詢問(tmp_path):
+def test_interactive_global_only_asks_current_keys(tmp_path):
     target = _寫好一個站台(tmp_path)
-    # 下載目錄 Enter 保留、上傳目錄輸入新值、附件上限輸入 -（清空，本來就沒設）
-    script = 腳本化提問(answers=["", str(tmp_path), "-"], confirms=[], choices=[])
-
-    code = _set_global(script, target)
-
-    assert code == 0
-    設定 = tomllib.loads(target.read_text(encoding="utf-8"))
-    assert 設定["download_dir"] == "D:/dl"
-    # 同理改驗真正的契約：upload_dir 讀回來的值必須等於使用者輸入的值。
-    assert 設定["upload_dir"] == str(tmp_path)
+    script = 腳本化提問(answers=["25"], confirms=[], choices=[])
+    assert _set_global(script, target) == 0
+    settings = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert settings["max_attachment_mb"] == 25
+    assert settings["download_dir"] == "D:/dl"
     script.assert_exhausted()
 
 

@@ -370,34 +370,15 @@ _NEW_FILE_HEADER = """\
 """
 
 
-def render_new_config(block: str, download_dir: str | None, upload_dir: str | None) -> str:
-    """產生一份全新的參數檔全文。
-
-    參數:
-        block: `render_site_block()` 產生的站台區塊。
-        download_dir: 附件下載目錄；為 None 時整行省略（附件下載隨之停用）。
-        upload_dir: 允許上傳的來源目錄；為 None 時整行省略。
-    回傳:
-        含說明註解、全域鍵與站台區塊的完整檔案內容。
-    """
-    parts = [_NEW_FILE_HEADER]
-    globals_: list[str] = []
-    if download_dir:
-        globals_.append(f'download_dir = "{escape_toml(download_dir)}"')
-    if upload_dir:
-        globals_.append(f'upload_dir   = "{escape_toml(upload_dir)}"')
-    if globals_:
-        parts.append("\n".join(globals_) + "\n")
-    parts.append(block)
-    return "\n".join(parts)
+def render_new_config(block: str) -> str:
+    """產生新參數檔；附件目錄自動管理，無需路徑設定。"""
+    return _NEW_FILE_HEADER + "\n" + block
 
 
 def convert_legacy(text: str) -> str:
     """把舊的扁平格式轉成 [sites.default] 格式。
 
-    這一步會重新產生整個檔案，**原有註解不保留**——呼叫端必須先向使用者說明並取得
-    同意。之所以不做文字層級的搬移，是因為舊格式的鍵散在最外層、與全域鍵混在一起，
-    逐行搬移的分支比重新產生多且更容易出錯。
+    搬移 url、api_key 與 description 至站台區塊，其餘全域設定與舊路徑文字保留。
 
     參數:
         text: 舊格式的參數檔全文。
@@ -415,13 +396,12 @@ def convert_legacy(text: str) -> str:
         str(raw.get("api_key", "")),
         str(raw["description"]) if raw.get("description") else None,
     )
-    download = raw.get("download_dir")
-    upload = raw.get("upload_dir")
-    return render_new_config(
-        block,
-        str(download) if download else None,
-        str(upload) if upload else None,
-    )
+    # 保留舊全域鍵的原始文字（含字面值），只搬移站台欄位。
+    remaining = text
+    for key in ("url", "api_key", "description"):
+        remaining = remove_key_in(remaining, global_region(remaining), key)
+    return upsert_site_block(remaining, "default", block)
+
 
 
 def validate_config_text(text: str, *, allow_no_sites: bool = False) -> None:

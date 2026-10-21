@@ -796,7 +796,7 @@ def run_setup(
     if kind == "legacy":
         prompts.say("偵測到舊的扁平格式（url／api_key 直接寫在最外層）。")
         prompts.say("新舊格式混用會讓 server 啟動失敗，必須先轉成 [sites.default]。")
-        prompts.say("注意：轉換會重新產生整個檔案，原有的註解不會保留。")
+        prompts.say("轉換會搬移站台欄位，其他設定與舊路徑文字會保留。")
         if not prompts.confirm("要現在轉換嗎？"):
             prompts.say("已取消，參數檔未被修改。")
             return 1
@@ -909,28 +909,20 @@ def run_setup(
         # 第二站以上才需要說明——它的用途是幫模型把口語對應到代號，只有一站時沒有歧義。
         description = prompts.ask("這個站台是做什麼的？（選填，直接 Enter 略過）") or None
 
-    # 下載／上傳目錄是參數檔的全域鍵，只在全新建立參數檔時才問：既有檔案（sites 格式、
-    # legacy 轉換後、甚至只有註解的檔案）走 upsert_site_block()，它只替換／附加單一
-    # [sites.*] 區塊，收不到這兩個值──問了卻不會被用上，比不問更糟（使用者會誤以為
-    # 已經改好）。要調整既有檔案的全域鍵，請直接編輯該檔。
-    download_dir: str | None = None
-    upload_dir: str | None = None
-    if not existing:
-        if bundle_mode:
-            # 不問：非 IT 使用者對「上傳來源目錄」沒有判斷依據，給錯會讓附件功能直接
-            # 失效。預設走使用者目錄下的 Downloads，要改用 config set-global。
-            download_dir = str(Path.home() / "Downloads" / "redmine-mcp")
-            prompts.say(f"附件下載目錄：{download_dir}（要改用 redmine-mcp config set-global）")
-        else:
-            download_dir = prompts.ask("附件下載目錄（選填，留白則停用附件下載）") or None
-            upload_dir = prompts.ask("允許上傳的來源目錄（選填，留白則沿用下載目錄）") or None
-    else:
-        prompts.say("既有參數檔的全域設定（下載／上傳目錄）維持不變，要調整請直接編輯該檔。")
+    prompts.say("附件暫存由系統自動管理：閒置滿 7 天壓縮，壓縮後保留 30 天；原始檔不受影響。")
 
     block = toml_edit.render_site_block(site, url, api_key, description)
     if existing:
         try:
-            content = toml_edit.upsert_site_block(existing, site, block)
+            found = toml_edit.find_site_block(existing, site)
+            if found is not None:
+                # 只改本次詢問的欄位；保留舊路徑、大小上限與未知鍵的原文。
+                changes: list[config_ops.Change] = [
+                    ("url", url), ("api_key", api_key), ("description", description),
+                ]
+                content = config_ops.apply_changes(existing, config_ops.site_locator(site), changes)
+            else:
+                content = toml_edit.upsert_site_block(existing, site, block)
         except ConfigError as exc:
             # 站台以非標準寫法存在（例如 ["sites"."main"]）時，upsert_site_block()
             # 會拋出這個例外並在訊息裡給出處理建議；沒接住就會變成使用者看不懂的
@@ -938,7 +930,7 @@ def run_setup(
             prompts.say(f"[red]×[/red] {exc}")
             return 1
     else:
-        content = toml_edit.render_new_config(block, download_dir, upload_dir)
+        content = toml_edit.render_new_config(block)
 
     try:
         # 與 config_ops.commit() 同一道閘門：寫檔前先確認組出來的全文是合法 TOML，
