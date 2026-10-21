@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import importlib
 import json
 import logging
 import os
@@ -250,11 +249,6 @@ class AttachmentStore:
                 yield data
 
     def sweep(self, stop: threading.Event | None = None) -> None:
-        # Task 4 會提供生命週期掃描；匯入維持 lazy，未實作時不可假裝清理成功。
-        try:
-            lifecycle = importlib.import_module(f"{__package__}.lifecycle")
-        except ModuleNotFoundError as exc:
-            if exc.name != f"{__package__}.lifecycle":
-                raise
-            raise NotImplementedError("附件生命週期掃描尚未實作") from None
-        lifecycle.sweep(self, stop)
+        from .lifecycle import sweep
+
+        sweep(self, stop)

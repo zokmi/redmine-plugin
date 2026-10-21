@@ -162,11 +162,6 @@ def test_unknown_file_inside_root_is_never_enrolled(tmp_path: Path) -> None:
     assert list(root.iterdir()) == [source]
 
 
-def test_sweep_is_explicitly_unimplemented_until_task4(tmp_path: Path) -> None:
-    with pytest.raises(NotImplementedError):
-        make_store(tmp_path / "managed").sweep()
-
-
 def test_safe_creation_rejects_linked_root(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()

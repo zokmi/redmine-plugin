@@ -9,7 +9,7 @@ import os
 import stat
 import sys
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import BinaryIO
@@ -69,6 +69,7 @@ def _open_fd(
     create: bool = False,
     exclusive: bool = False,
     rename: bool = False,
+    deny_write: bool = False,
 ) -> int:
     flags = os.O_RDWR if write else os.O_RDONLY
     if sys.platform == "win32":
@@ -80,6 +81,7 @@ def _open_fd(
             access,
             1 if exclusive else (4 if create else 3),
             parent=parent_fd,
+            share_write=not deny_write,
         )
         try:
             fd = msvcrt.open_osfhandle(handle, flags | os.O_BINARY)
@@ -142,10 +144,10 @@ def assert_managed_path(root: Path, path: Path) -> None:
 
 
 @contextmanager
-def open_regular(path: Path) -> Iterator[BinaryIO]:
+def open_regular(path: Path, *, deny_write: bool = False) -> Iterator[BinaryIO]:
     """不跟隨連結開啟一般檔案，直到使用者離開 context 才釋放祖先 handle。"""
     with _parent(path) as (path, parent_fd):
-        fd = _open_fd(path, parent_fd)
+        fd = _open_fd(path, parent_fd, deny_write=deny_write)
         with os.fdopen(fd, "rb") as stream:
             yield stream
 
@@ -343,3 +345,38 @@ def open_regular_writer(path: Path) -> Iterator[BinaryIO]:
         fd = _open_fd(path, parent_fd, write=True)
         with os.fdopen(fd, "r+b") as stream:
             yield stream
+
+
+def list_names(path: Path) -> list[str]:
+    """Discover names only; callers must open every candidate through anchored helpers."""
+    with _parent(path / ".enumeration") as (_, parent_fd):
+        return os.listdir(path if sys.platform == "win32" else parent_fd)
+
+
+def remove_regular(
+    path: Path, *, identity: tuple[int, int], validate: Callable[[BinaryIO], None]
+) -> None:
+    """Validate the same opened inode that is deleted; retain on any uncertainty."""
+    with _parent(path) as (path, parent_fd):
+        fd = _open_fd(path, parent_fd, rename=True, deny_write=True)
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(fd)
+            if (before.st_dev, before.st_ino) != identity:
+                raise OSError(errno.ESTALE, "File identity changed; retained")
+            validate(stream)
+            after = os.fstat(fd)
+            if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                after.st_size, after.st_mtime_ns, after.st_ctime_ns
+            ):
+                raise OSError(errno.ESTALE, "File changed during validation; retained")
+            if sys.platform == "win32":
+                import msvcrt
+
+                _windows.delete_open_file(msvcrt.get_osfhandle(fd))
+            else:
+                current = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if not stat.S_ISREG(current.st_mode) or (
+                    current.st_dev, current.st_ino
+                ) != identity:
+                    raise OSError(errno.ESTALE, "File replaced; retained")
+                os.unlink(path.name, dir_fd=parent_fd)

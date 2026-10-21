@@ -95,7 +95,8 @@ if sys.platform == "win32":
         return dll
 
     def _relative_handle(
-        name: str, parent: int, access: int, disposition: int, *, directory: bool | None = False
+        name: str, parent: int, access: int, disposition: int, *,
+        directory: bool | None = False, share_write: bool = True
     ) -> int:
         buffer = ctypes.create_unicode_buffer(name)
         length = len(name.encode("utf-16-le"))
@@ -117,7 +118,7 @@ if sys.platform == "win32":
             ctypes.byref(status),
             None,
             0,
-            0x1 | 0x2,
+            0x1 | (0x2 if share_write else 0),
             {1: 2, 3: 1, 4: 3}[disposition],
             0x20 | 0x200000 | 0x4000 | (1 if directory is True else 0),
             None,
@@ -135,6 +136,7 @@ if sys.platform == "win32":
         *,
         directory: bool | None = False,
         parent: int | None = None,
+        share_write: bool = True,
     ) -> int:
         if parent is None:
             # 僅磁碟根目錄使用 Win32 完整路徑；其餘名稱均相對已固定的父 handle。
@@ -150,7 +152,9 @@ if sys.platform == "win32":
             if handle == ctypes.c_void_p(-1).value:
                 raise ctypes.WinError(ctypes.get_last_error())
         else:
-            handle = _relative_handle(path.name, parent, access, disposition, directory=directory)
+            handle = _relative_handle(
+                path.name, parent, access, disposition, directory=directory, share_write=share_write
+            )
         try:
             info = _FileInfo()
             if not api().GetFileInformationByHandle(handle, ctypes.byref(info)):
@@ -183,6 +187,17 @@ if sys.platform == "win32":
             ctypes.byref(info),
             ctypes.sizeof(info),
             10,
+        )
+        if result < 0:
+            raise ctypes.WinError(_nt_api().RtlNtStatusToDosError(result))
+
+
+    def delete_open_file(handle: int) -> None:
+        """Mark the verified open file for deletion without resolving its path again."""
+        info = ctypes.c_ubyte(1)
+        status = _IoStatus()
+        result = _nt_api().NtSetInformationFile(
+            handle, ctypes.byref(status), ctypes.byref(info), ctypes.sizeof(info), 13
         )
         if result < 0:
             raise ctypes.WinError(_nt_api().RtlNtStatusToDosError(result))
