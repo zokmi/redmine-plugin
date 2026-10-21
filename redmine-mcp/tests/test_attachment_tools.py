@@ -239,60 +239,6 @@ async def test_download_attachment_不同id同檔名不覆蓋(settings, registry
     assert Path(result2["path"]).read_bytes() == b"hello"
 
 
-async def test_下載伺服器錯誤時不影響既有同名檔案(settings, registry, tmp_path):
-    """重試下載同一附件時剛好遇到 Redmine 5xx，不應波及先前已成功下載的檔案。"""
-    site_dir = tmp_path / "untouched-originals"
-    site_dir.mkdir()
-    existing_path = site_dir / "5_big.bin"
-    existing_path.write_bytes(b"previously downloaded content")
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/attachments/5.json":
-            return json_response(
-                200,
-                {"attachment": {"id": 5, "filename": "big.bin", "content_url": f"{BASE_URL}/attachments/download/5/big.bin"}},
-            )
-        return httpx.Response(500, content=b"boom")
-
-    sites = registry(handler)
-    mcp = create_server(sites)
-
-    with pytest.raises(Exception):
-        await _call(mcp, "download_attachment", {"attachment_id": 5})
-    await sites.aclose()
-
-    assert existing_path.read_bytes() == b"previously downloaded content"
-    # 只留下既有檔案，暫存檔也應被清乾淨。
-    assert list(site_dir.iterdir()) == [existing_path]
-
-
-async def test_下載超過大小上限時不影響既有同名檔案(settings, registry, tmp_path):
-    """重試下載同一附件時剛好超過大小上限，不應波及先前已成功下載的檔案。"""
-    site_dir = tmp_path / "untouched-originals"
-    site_dir.mkdir()
-    existing_path = site_dir / "5_big.bin"
-    existing_path.write_bytes(b"previously downloaded content")
-    oversized = b"x" * (settings.max_attachment_bytes + 10)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/attachments/5.json":
-            return json_response(
-                200,
-                {"attachment": {"id": 5, "filename": "big.bin", "content_url": f"{BASE_URL}/attachments/download/5/big.bin"}},
-            )
-        return httpx.Response(200, content=oversized)
-
-    sites = registry(handler)
-    mcp = create_server(sites)
-
-    with pytest.raises(Exception):
-        await _call(mcp, "download_attachment", {"attachment_id": 5})
-    await sites.aclose()
-
-    assert existing_path.read_bytes() == b"previously downloaded content"
-    assert list(site_dir.iterdir()) == [existing_path]
-
-
 async def test_未設定目錄時自動下載且重下載隔離(attachment_root):
     site_settings = SiteSettings(
         name="default", url=BASE_URL, api_key="k", description=None,

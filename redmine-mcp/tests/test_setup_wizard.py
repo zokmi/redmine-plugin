@@ -493,31 +493,18 @@ def test_權限收緊失敗會提示使用者(tmp_path):
     script.assert_exhausted()
 
 
-def test_取代非標準寫法的站台會回報錯誤而不是丟例外(tmp_path):
-    """I-4：upsert_site_block() 的 ConfigError 要被接住並回報，不能變成 traceback。
-
-    取代分支現在會先用既有金鑰驗一次並問要不要換（`_成功驗證` 對任何金鑰都放行），
-    這裡答「要換」才會進到 `ask_secret`；ConfigError 仍在「確認寫入嗎？」之前就會
-    被拋出並接住，因此除了這一題之外不再消耗其他 confirm。
-    """
+def test_wizard_replaces_quoted_table(tmp_path):
     target = tmp_path / "config.toml"
-    原文 = '["sites"."main"]\nurl = "https://a/x"\napi_key = "old"\n'
-    target.write_text(原文, encoding="utf-8")
-    script = 腳本化提問(
-        answers=["https://new/x", "newkey", ""],
-        confirms=[True],  # 要換一把新的金鑰嗎？（要換）
-        choices=[1, 0],  # 取代其中一個站台 → 選 main
-    )
-    code = run_setup(
-        script.build(),
-        config_path=target,
-        run=_固定回應(1),
-        verify=_成功驗證,
-    )
-    assert code == 1
-    assert target.read_text(encoding="utf-8") == 原文
-    全部輸出 = "\n".join(script.said)
-    assert "無法安全改寫" in 全部輸出
+    target.write_text('["sites"."main"]\nurl = "https://a/x"\napi_key = "old"\n',
+                      encoding="utf-8")
+    script = 腳本化提問(answers=["https://new/x", "newkey", ""],
+                         confirms=[True, True], choices=[1, 0])
+    assert run_setup(script.build(), config_path=target, run=_固定回應(0),
+                     verify=_成功驗證, finish=False) == 0
+    content = target.read_text(encoding="utf-8")
+    assert '["sites"."main"]' in content
+    assert 'url = "https://new/x"' in content
+    assert 'api_key = "newkey"' in content
     script.assert_exhausted()
 
 

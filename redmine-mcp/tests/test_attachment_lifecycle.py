@@ -507,3 +507,137 @@ def test_archive_retention_starts_after_compression_completes(tmp_path, monkeypa
     store.sweep()
     current = store.load_record(record.site_key, record.item_id)
     assert current.archived_at == times[0].isoformat()
+
+
+def test_retention_starts_after_download_completion(tmp_path):
+    times = [NOW]
+    store = AttachmentStore(tmp_path / "managed", clock=lambda: times[0])
+    with store.begin_download("https://example.test", "report.bin") as pending:
+        with pending.open_writer() as output:
+            output.write(DATA)
+        times[0] += timedelta(days=2)
+        path = pending.publish()
+    record = store._record_for(path)
+    assert record.created_at == times[0].isoformat()
+    assert record.last_used_at == times[0].isoformat()
+    times[0] += timedelta(days=7, microseconds=-1)
+    store.sweep()
+    assert path.read_bytes() == DATA
+    times[0] += timedelta(microseconds=1)
+    store.sweep()
+    assert not path.exists()
+    assert store.load_record(record.site_key, record.item_id).state == "archived"
+
+
+@pytest.mark.parametrize("state", ["active", "archive_published", "archived"])
+@pytest.mark.parametrize("field", ["created_at", "last_used_at", "archived_at"])
+def test_future_timestamps_warn_and_preserve_files(tmp_path, monkeypatch, caplog, state, field):
+    store, times, path, record, archive = setup_item(tmp_path)
+    times[0] += timedelta(days=7)
+    if state != "active":
+        with monkeypatch.context() as patch:
+            patch.setattr(file_ops, "remove_regular",
+                          lambda *a, **k: (_ for _ in ()).throw(OSError("retain original")))
+            store.sweep()
+        record = store.load_record(record.site_key, record.item_id)
+    times[0] += timedelta(days=40)
+    record = replace(record, state=state, **{field: (times[0] + timedelta(days=1)).isoformat()})
+    file_ops.atomic_json(store.record_path(record), record.to_json())
+    before_archive = archive.read_bytes() if archive.exists() else None
+    caplog.clear()
+    store.sweep()
+    assert path.read_bytes() == DATA
+    assert (archive.read_bytes() if archive.exists() else None) == before_archive
+    assert store.load_record(record.site_key, record.item_id) == record
+    assert "future timestamp" in caplog.text
+    assert "attachment contents" not in caplog.text
+
+
+@pytest.mark.parametrize("barrier", ["archive", "record", "recovery"])
+def test_publication_barrier_failure_retains_original_and_retry_recovers(tmp_path, monkeypatch, barrier):
+    store, times, path, record, archive = setup_item(tmp_path)
+    times[0] += timedelta(days=7)
+    reached = []
+    original_sync = getattr(file_ops, "_sync_directory", None)
+
+    def fail(fd):
+        current = store.load_record(record.site_key, record.item_id)
+        if ((barrier == "archive" and archive.exists() and current.state == "active")
+                or (barrier in {"record", "recovery"} and current.state == "archive_published")):
+            reached.append(current.state)
+            raise OSError("injected directory fsync failure")
+        if original_sync is not None:
+            original_sync(fd)
+
+    if barrier == "recovery":
+        with monkeypatch.context() as patch:
+            patch.setattr(file_ops, "remove_regular",
+                          lambda *a, **k: (_ for _ in ()).throw(OSError("interrupted")))
+            store.sweep()
+    with monkeypatch.context() as patch:
+        patch.setattr(file_ops, "_sync_directory", fail, raising=False)
+        store.sweep()
+    assert reached, "publication/recovery must pass a directory durability barrier"
+    assert path.read_bytes() == DATA
+    assert archive.exists()
+    store.sweep()
+    assert not path.exists() and archive.exists()
+    assert store.load_record(record.site_key, record.item_id).state == "archived"
+
+
+def test_archive_and_record_barriers_precede_original_deletion(tmp_path, monkeypatch):
+    store, times, path, record, archive = setup_item(tmp_path)
+    times[0] += timedelta(days=7)
+    phases = []
+    remove = file_ops.remove_regular
+
+    def sync(fd):
+        if archive.exists():
+            phases.append(store.load_record(record.site_key, record.item_id).state)
+
+    def deleting(target, **kwargs):
+        if target == path:
+            assert "active" in phases
+            assert "archive_published" in phases
+            phases.append("delete")
+        return remove(target, **kwargs)
+
+    monkeypatch.setattr(file_ops, "_sync_directory", sync, raising=False)
+    monkeypatch.setattr(file_ops, "remove_regular", deleting)
+    store.sweep()
+    assert "delete" in phases
+    assert not path.exists()
+
+
+def test_recovery_syncs_missing_original_before_advancing_record(tmp_path, monkeypatch):
+    store, times, path, record, archive = setup_item(tmp_path)
+    times[0] += timedelta(days=7)
+    remove = file_ops.remove_regular
+
+    def interrupted(target, **kwargs):
+        remove(target, **kwargs)
+        if target == path:
+            raise OSError("crash after unlink")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(file_ops, "remove_regular", interrupted)
+        store.sweep()
+    assert not path.exists() and archive.exists()
+    assert store.load_record(record.site_key, record.item_id).state == "archive_published"
+    sync_parent = file_ops.sync_parent
+    observed = []
+
+    def fail(target):
+        if target == path:
+            observed.append(target)
+            raise OSError("unlink barrier failed")
+        sync_parent(target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(file_ops, "sync_parent", fail)
+        store.sweep()
+    assert observed == [path]
+    assert archive.exists()
+    assert store.load_record(record.site_key, record.item_id).state == "archive_published"
+    store.sweep()
+    assert store.load_record(record.site_key, record.item_id).state == "archived"

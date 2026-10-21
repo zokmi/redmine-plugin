@@ -142,7 +142,9 @@ class PendingDownload:
         target = self._store.item_path(self._record)
         size, digest = file_ops.publish_regular(self.path, target, identity=self._identity)
         self._published = target
-        record = replace(self._record, size=size, sha256=digest)
+        completed_at = _utc(self._store.clock())
+        record = replace(self._record, size=size, sha256=digest,
+                         created_at=completed_at, last_used_at=completed_at)
         try:
             file_ops.atomic_json(self._store.record_path(record), record.to_json())
         except OSError:

@@ -924,9 +924,7 @@ def run_setup(
             else:
                 content = toml_edit.upsert_site_block(existing, site, block)
         except ConfigError as exc:
-            # 站台以非標準寫法存在（例如 ["sites"."main"]）時，upsert_site_block()
-            # 會拋出這個例外並在訊息裡給出處理建議；沒接住就會變成使用者看不懂的
-            # traceback，等於 toml_edit 那層的防護白做。
+            # 無法安全定位或編輯結果語意不符時，保留原檔並回報。
             prompts.say(f"[red]×[/red] {exc}")
             return 1
     else:
@@ -939,6 +937,10 @@ def run_setup(
         # toml_edit.explain_validation_failure()，與 config_ops.commit() 共用同一份，
         # 不再各自寫一份會分歧的訊息。
         toml_edit.validate_config_text(content)
+        written_site = tomllib.loads(content).get("sites", {}).get(site, {})
+        if (written_site.get("url") != url or written_site.get("api_key") != api_key
+                or written_site.get("description") != description):
+            raise ConfigError("設定編輯結果與要求不符，參數檔未變更")
     except ConfigError as exc:
         for line in toml_edit.explain_validation_failure(exc):
             prompts.say(line)

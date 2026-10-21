@@ -210,8 +210,7 @@ def site_locator(site: str) -> Locator:
     參數:
         site: 站台代號。
     例外:
-        ConfigError: 呼叫時找不到該區塊（例如站台以 ["sites"."main"] 這種非標準寫法
-            存在，tomllib 看得到但行首樣式定位不到）。
+        ConfigError: 呼叫時找不到可安全編輯的獨立站台區塊。
     """
 
     def locate(text: str) -> tuple[int, int]:
@@ -239,12 +238,26 @@ def apply_changes(text: str, locate: Locator, changes: Sequence[Change]) -> str:
     回傳:
         編輯後的全文。
     """
+    expected = tomllib.loads(text)
+    target = expected
+    for component in toml_edit.table_at(text, locate(text)):
+        target = target[component]
     for key, value in changes:
+        if value is None:
+            target.pop(key, None)
+        else:
+            target[key] = value
         span = locate(text)
         if value is None:
             text = toml_edit.remove_key_in(text, span, key)
         else:
             text = toml_edit.set_key_in(text, span, key, value)
+    try:
+        actual = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError("設定編輯結果無法解析，參數檔未變更") from exc
+    if actual != expected:
+        raise ConfigError("設定編輯結果與要求不符，參數檔未變更")
     return text
 
 
@@ -556,7 +569,11 @@ def set_global(
         prompts.say("沒有任何變更，參數檔未被修改。")
         return 0
 
-    new_text = apply_changes(loaded.text, global_locator(), changes)
+    try:
+        new_text = apply_changes(loaded.text, global_locator(), changes)
+    except ConfigError as exc:
+        prompts.say(f"[red]×[/red] {exc}")
+        return 1
     preview = [f"{key} = {值[key]}" for key in sorted(值)]
     preview += [f"{key}：清空" for key in sorted(clear)]
     return commit(prompts, config_path, new_text, preview, run=run, assume_yes=assume_yes)

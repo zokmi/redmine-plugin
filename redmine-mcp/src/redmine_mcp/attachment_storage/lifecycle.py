@@ -87,12 +87,12 @@ def _archive_path(store: AttachmentStore, record: ItemRecord) -> Path:
 def _archive(store: AttachmentStore, record: ItemRecord) -> ItemRecord:
     archive_path = _archive_path(store, record)
     original = store.item_path(record)
+    file_ops.ensure_directory(archive_path.parent)
     if record.state == "active":
         with file_ops.open_regular(original, deny_write=True) as source:
             identity = _identity(source)
             size, digest = _fingerprint(source)
             record = replace(record, size=size, sha256=digest)
-            file_ops.ensure_directory(archive_path.parent)
             try:
                 with file_ops.open_regular(archive_path, deny_write=True) as existing:
                     _verify_zip(existing, record)
@@ -115,11 +115,16 @@ def _archive(store: AttachmentStore, record: ItemRecord) -> ItemRecord:
     # concurrent writers and replacement; POSIX still revalidates content below.
     with file_ops.open_regular(archive_path, deny_write=True) as archive:
         _verify_zip(archive, record)
+        # Recovery may observe names from a failed barrier in this same boot.
+        # Make both publications durable again before deleting the only original.
+        file_ops.sync_parent(archive_path)
+        file_ops.sync_parent(store.record_path(record))
         if identity is not None:
             def validate(source: BinaryIO) -> None:
                 _verify_source(source, record)
                 _verify_zip(archive, record)
             file_ops.remove_regular(original, identity=identity, validate=validate)
+    file_ops.sync_parent(original)
     record = replace(record, state="archived")
     file_ops.atomic_json(store.record_path(record), record.to_json())
     return record
@@ -132,7 +137,8 @@ def _expire(store: AttachmentStore, record: ItemRecord) -> None:
             _verify_zip(archive, record)
             identity = _identity(archive)
     except FileNotFoundError:
-        pass  # An earlier expiry may have deleted ZIP before metadata deletion.
+        # Persist an earlier unlink before forgetting the recovery record.
+        file_ops.sync_parent(archive_path)
     else:
         file_ops.remove_regular(
             archive_path, identity=identity, validate=lambda stream: _verify_zip(stream, record)
@@ -151,6 +157,7 @@ def _sweep_item(store: AttachmentStore, record: ItemRecord, now: datetime) -> No
     if any(datetime.fromisoformat(value) > now for value in (
         record.created_at, record.last_used_at, record.archived_at or record.created_at
     )):
+        logger.warning("Attachment lifecycle skipped an item with a future timestamp")
         return
     if record.state == "active":
         if now - datetime.fromisoformat(record.last_used_at) < timedelta(seconds=IDLE_SECONDS):

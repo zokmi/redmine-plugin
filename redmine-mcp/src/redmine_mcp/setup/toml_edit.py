@@ -8,8 +8,11 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import tomllib
+from collections.abc import Iterator
+from dataclasses import dataclass
 from io import StringIO
 
 from redmine_mcp.config import ConfigError, load_settings
@@ -19,14 +22,14 @@ from redmine_mcp.config_file import LEGACY_SITE_KEYS, structure_config
 def escape_toml(value: str) -> str:
     """把值逸出成可安全放進 TOML 基本字串（雙引號字串）的形式。
 
-    反斜線必須先處理，否則會把後面新加的逸出斜線再逸出一次。
+    使用 JSON 共通的基本字串逸出，涵蓋反斜線、引號與控制字元。
 
     參數:
         value: 原始值。
     回傳:
         逸出後的字串，不含外層引號。
     """
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    return json.dumps(value, ensure_ascii=False)[1:-1]
 
 
 def mask_secret(value: str) -> str:
@@ -68,10 +71,50 @@ def classify(text: str) -> str:
     return "empty"
 
 
-#: 站台區塊的標頭樣式。只認行首、未加引號的標準寫法；引號寫法交由 upsert 判錯。
 _HEADER = "[sites.{site}]"
-#: 任一表格標頭的行首樣式，用來找出目前區塊的結束位置。
-_ANY_HEADER = re.compile(r"^\[", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class _Statement:
+    start: int
+    end: int
+    data: dict[str, object]
+    header: bool
+
+
+def _statements(text: str) -> Iterator[_Statement]:
+    """Yield complete TOML statements with original offsets; only LF ends a line."""
+    classify(text)  # Reject invalid input before attempting partial-statement parsing.
+    pending = ""
+    start = 0
+    for line in StringIO(text, newline="\n"):
+        pending += line
+        try:
+            data = tomllib.loads(pending)
+        except tomllib.TOMLDecodeError:
+            continue
+        end = start + len(pending)
+        yield _Statement(start, end, data, pending.lstrip(" \t").startswith("["))
+        start, pending = end, ""
+    if pending:
+        raise ConfigError("無法辨識完整 TOML 敘述，參數檔未變更")
+
+
+def _header_path(statement: _Statement) -> tuple[str, ...]:
+    path: list[str] = []
+    data: object = statement.data
+    while isinstance(data, dict) and len(data) == 1:
+        key, data = next(iter(data.items()))
+        path.append(key)
+    return tuple(path)
+
+
+def table_at(text: str, span: tuple[int, int]) -> tuple[str, ...]:
+    """Decoded table identity for a located edit region, used for semantic checks."""
+    for statement in _statements(text):
+        if span[0] < span[1] and statement.start == span[0] and statement.header:
+            return _header_path(statement)
+    return ()
 
 
 def render_site_block(site: str, url: str, api_key: str, description: str | None) -> str:
@@ -125,45 +168,19 @@ def _trim_trailing_annotations(text: str, start: int, end: int) -> int:
 
 
 def find_site_block(text: str, site: str) -> tuple[int, int] | None:
-    """找出指定站台區塊在全文中的位置。
-
-    區塊從自己的標頭開始，到下一個行首 `[` 之前為止（沒有下一個就到檔尾），但尾端若是
-    連續的空行或整行註解、且緊接著下一個站台標頭，會被 `_trim_trailing_annotations()`
-    退還給下一個區塊——那通常是使用者寫給下一站看的說明，不該被算進本區塊。
-
-    參數:
-        text: 參數檔全文。
-        site: 站台代號。
-    回傳:
-        `(起始索引, 結束索引)`；找不到時為 None。
-    """
-    header = _HEADER.format(site=site)
-    for match in _ANY_HEADER.finditer(text):
-        if not text.startswith(header, match.start()):
+    """Decode actual table headers and locate a complete site block, preserving annotations."""
+    statements = list(_statements(text))
+    for index, statement in enumerate(statements):
+        if not statement.header or _header_path(statement) != ("sites", site):
             continue
-        after = text[match.start() + len(header) :]
-        if after[:1] not in ("", "\n", "\r", " ", "\t"):
-            # [sites.mainx] 不該被 [sites.main] 命中。
-            continue
-        nxt = _ANY_HEADER.search(text, match.start() + 1)
-        end = nxt.start() if nxt else len(text)
-        return match.start(), _trim_trailing_annotations(text, match.start(), end)
+        end = next((item.start for item in statements[index + 1:] if item.header), len(text))
+        return statement.start, _trim_trailing_annotations(text, statement.start, end)
     return None
 
 
 def global_region(text: str) -> tuple[int, int]:
-    """回傳全域鍵所在區間：檔頭到第一個行首 `[` 之前。
-
-    這是 TOML 本身的語意——第一個表格標頭之後的鍵都屬於那個表格——順帶解掉最危險的
-    誤動：`[sites.main]` 底下同樣可以有 download_dir，只在這個區間內搜尋就不會改錯層。
-
-    參數:
-        text: 參數檔全文。
-    回傳:
-        `(起始索引, 結束索引)`；沒有任何表格標頭時為整份內容。
-    """
-    match = _ANY_HEADER.search(text)
-    return 0, match.start() if match else len(text)
+    """Root statements end at the first actual table, ignoring headers inside strings."""
+    return 0, next((item.start for item in _statements(text) if item.header), len(text))
 
 
 def _render_value(value: str | int) -> str:
@@ -171,53 +188,28 @@ def _render_value(value: str | int) -> str:
     return str(value) if isinstance(value, int) else f'"{escape_toml(value)}"'
 
 
-def _key_line(key: str) -> re.Pattern[str]:
-    """組出比對「行首某鍵的賦值行」的樣式。
+_ASSIGNMENT = re.compile(r"([ \t]*(?:[A-Za-z0-9_-]+|\"(?:\\.|[^\"\\])*\"|'[^']*')[ \t]*=)")
 
-    錨定行首且不允許前導空白或 `#`：註解掉的同名行（`# download_dir = ...`）不可被
-    當成該鍵，否則使用者的說明會被替換掉，真正的設定又沒寫進去。
 
-    第一個捕獲群組只框住「鍵名＋鍵名後的空白＋`=`」，不含值：set_key_in() 就地換值
-    時要保留這段前綴（原本為了對齊 url／api_key／description 打的空格），只換掉
-    `=` 後面的值，否則每次改一個欄位就會把整塊手動對齊的版面弄歪。第二個捕獲群組框住
-    `=` 後面的全部內容（值＋可能的行內註解），供 set_key_in() 拆出行內註解後保留。
-    """
-    return re.compile(rf"^({re.escape(key)}[ \t]*=)([ \t]*.*)$", re.MULTILINE)
+def _key_statement(text: str, span: tuple[int, int], key: str) -> _Statement | None:
+    return next((item for item in _statements(text)
+                 if span[0] <= item.start < span[1] and not item.header
+                 and key in item.data), None)
 
 
 def _split_value_comment(rest: str) -> tuple[str, str]:
-    """把 `=` 之後的內容拆成 (值, 行內註解)。
-
-    不能直接用正則找第一個 `#`：`api_key = "ab#cd"` 的井號在雙引號內，是值的一部分。
-    因此逐字掃描並追蹤是否位於雙引號字串內（含反斜線轉義），
-    只把引號外的第一個井號當成註解起點。
-
-    參數:
-        rest: 賦值行中 `=` 之後的全部內容（不含換行）。
-    回傳:
-        `(值部分, 註解部分)`；沒有行內註解時註解為空字串。
-        值前面的空白保留在值部分；值與 `#` 之間的空白算進註解部分——`set_key_in()`
-        換值時只保留註解部分、丟棄值部分，若把這段空白留在值部分會在換值後被一併
-        丟掉，讓版面（例如 `url = "..."   # 說明` 的對齊留白）塌陷成緊貼的
-        `"新值"# 說明`。
-    """
-    in_string = False
-    escaped = False
+    # A # is a comment only if everything before it is already a complete TOML value.
     for index, char in enumerate(rest):
-        if escaped:
-            escaped = False
+        if char != "#":
             continue
-        if char == "\\" and in_string:
-            escaped = True
+        try:
+            tomllib.loads("value = " + rest[:index])
+        except tomllib.TOMLDecodeError:
             continue
-        if char == '"':
-            in_string = not in_string
-            continue
-        if char == "#" and not in_string:
-            comment_start = index
-            while comment_start > 0 and rest[comment_start - 1] in " \t":
-                comment_start -= 1
-            return rest[:comment_start], rest[comment_start:]
+        comment_start = index
+        while comment_start > 0 and rest[comment_start - 1] in " \t":
+            comment_start -= 1
+        return rest[:comment_start], rest[comment_start:]
     return rest, ""
 
 
@@ -236,15 +228,17 @@ def set_key_in(text: str, span: tuple[int, int], key: str, value: str | int) -> 
     start, end = span
     region = text[start:end]
 
-    match = _key_line(key).search(region)
-    if match:
-        # 只換 `=` 後面的值，保留 match.group(1)（鍵名＋原本的對齊空白＋`=`）與
-        # 該行的行內註解——那是使用者手寫的說明，換個欄位值不該把它一起刪掉。
-        _, comment = _split_value_comment(match.group(2))
-        new_line = f"{match.group(1)} {_render_value(value)}{comment}"
-        return (
-            text[:start] + region[: match.start()] + new_line + region[match.end() :] + text[end:]
-        )
+    statement = _key_statement(text, span, key)
+    if statement is not None:
+        original = text[statement.start:statement.end]
+        match = _ASSIGNMENT.match(original)
+        if match is None:
+            raise ConfigError("無法安全辨識設定鍵，參數檔未變更")
+        body = original.rstrip("\r\n")
+        _, comment = _split_value_comment(body[match.end():])
+        replacement = (f"{match.group(1)} {_render_value(value)}{comment}"
+                       + original[len(body):])
+        return text[:statement.start] + replacement + text[statement.end:]
 
     line = f"{key} = {_render_value(value)}"
 
@@ -273,14 +267,10 @@ def remove_key_in(text: str, span: tuple[int, int], key: str) -> str:
     回傳:
         編輯後的全文。
     """
-    start, end = span
-    region = text[start:end]
-    match = _key_line(key).search(region)
-    if match is None:
+    statement = _key_statement(text, span, key)
+    if statement is None:
         return text
-    # 連同該行的換行一起移除，否則會留下一個空行。
-    after = match.end() + 1 if region[match.end() : match.end() + 1] == "\n" else match.end()
-    return text[:start] + region[: match.start()] + region[after:] + text[end:]
+    return text[:statement.start] + text[statement.end:]
 
 
 def upsert_site_block(text: str, site: str, block: str) -> str:
@@ -293,8 +283,8 @@ def upsert_site_block(text: str, site: str, block: str) -> str:
     回傳:
         寫入後的全文。
     例外:
-        ConfigError: TOML 解析得到該站台、但行首樣式定位不到（例如寫成
-            `["sites"."main"]`）。這時靜默附加會產生重複站台而讓 server 啟動失敗，
+        ConfigError: TOML 解析得到該站台，但沒有獨立表格標頭可安全定位。
+            這時靜默附加會產生重複站台而讓 server 啟動失敗，
             當場說清楚比留一個難查的壞檔好。
     """
     found = find_site_block(text, site)
@@ -393,27 +383,17 @@ def convert_legacy(text: str) -> str:
     # 只用 tomllib 辨識完整敘述；字串內的鍵名、表格標頭與註解都只是值的一部分。
     remaining: list[str] = []
     moved: list[str] = []
-    pending = ""
     at_root = True
-    # TOML 僅以 LF／CRLF 換行；Unicode 分隔字元在註解內仍是同一行。
-    for line in StringIO(text, newline="\n"):
-        pending += line
-        try:
-            statement = tomllib.loads(pending)
-        except tomllib.TOMLDecodeError:
-            # 合法全文已由 classify 驗證；此時只可能尚未讀完跨行敘述。
-            continue
-        if pending.lstrip().startswith("["):
+    for statement in _statements(text):
+        if statement.header:
             at_root = False
-        if at_root and {"url", "api_key", "description"} & statement.keys():
-            moved.append(pending)
+        original = text[statement.start:statement.end]
+        if at_root and {"url", "api_key", "description"} & statement.data.keys():
+            moved.append(original)
         else:
-            remaining.append(pending)
-        pending = ""
-    if pending:
-        raise ConfigError("無法辨識舊參數檔的完整 TOML 敘述，參數檔未變更")
+            remaining.append(original)
 
-    # 搬移原文，保留跨行字串與引號／逸出語法；不經過通用的逐行編輯器。
+    # 搬移完整敘述原文，保留跨行字串與引號／逸出語法。
     prefix = "".join(remaining)
     block = "[sites.default]\n" + "".join(moved)
     if not block.endswith("\n"):

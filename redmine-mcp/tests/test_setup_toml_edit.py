@@ -112,12 +112,10 @@ def test_取代既有區塊不動其他站台():
     assert result == '[sites.a]\nurl = "NEW"\n\n[sites.b]\nurl = "2"\n'
 
 
-def test_解析得到站台卻定位不到就拋出而非靜默附加():
-    # 引號寫法 ["sites"."main"] tomllib 讀得到，但行首樣式比對不到。
-    # 這時若靜默附加，檔案會出現重複站台而 server 啟動即失敗——寧可當場說清楚。
+def test_quoted_table_is_replaced_without_duplicate():
     text = '["sites"."main"]\nurl = "1"\n'
-    with pytest.raises(ConfigError):
-        upsert_site_block(text, "main", '[sites.main]\nurl = "2"\n')
+    result = upsert_site_block(text, "main", '[sites.main]\nurl = "2"\n')
+    assert result == '[sites.main]\nurl = "2"\n'
 
 
 def test_新檔含說明註解與站台區塊():

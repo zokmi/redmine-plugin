@@ -222,6 +222,19 @@ def _replace_open_file(fd: int, temporary: Path, path: Path, parent_fd: int | No
         os.replace(temporary.name, path.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
 
 
+def _sync_directory(parent_fd: int | None) -> None:
+    """Persist POSIX directory entries using an already pinned descriptor."""
+    if sys.platform != "win32":
+        assert parent_fd is not None
+        os.fsync(parent_fd)
+
+
+def sync_parent(path: Path) -> None:
+    """Reestablish a publication/deletion barrier during conservative recovery."""
+    with _parent(path) as (_, parent_fd):
+        _sync_directory(parent_fd)
+
+
 def atomic_json(path: Path, payload: dict[str, object]) -> None:
     """同目錄唯一暫存檔寫入並 fsync，成功後才原子替換舊紀錄。"""
     data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -246,6 +259,7 @@ def atomic_json(path: Path, payload: dict[str, object]) -> None:
                     os.unlink(temporary.name, dir_fd=parent_fd)
                 except FileNotFoundError:
                     pass
+        _sync_directory(parent_fd)
 
 
 def ensure_directory(path: Path) -> None:
@@ -273,8 +287,11 @@ def ensure_directory(path: Path) -> None:
                     os.mkdir(component, 0o700, dir_fd=parent)
                 except FileExistsError:
                     pass
-                parent = os.open(component, flags, dir_fd=parent)
-                stack.callback(os.close, parent)
+                child = os.open(component, flags, dir_fd=parent)
+                stack.callback(os.close, child)
+                # Also sync existing entries: a previous mkdir barrier may have failed.
+                _sync_directory(parent)
+                parent = child
 
 
 @contextmanager
@@ -333,6 +350,7 @@ def publish_regular(
                 if not matches(target.name) or not matches(temporary.name):
                     raise OSError(errno.ESTALE, "發布項目已變更，保留現有檔案")
                 os.unlink(temporary.name, dir_fd=parent_fd)
+            _sync_directory(parent_fd)
             return size, digest.hexdigest()
         finally:
             os.close(fd)
@@ -380,3 +398,4 @@ def remove_regular(
                 ) != identity:
                     raise OSError(errno.ESTALE, "File replaced; retained")
                 os.unlink(path.name, dir_fd=parent_fd)
+                _sync_directory(parent_fd)

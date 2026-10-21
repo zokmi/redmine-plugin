@@ -421,3 +421,41 @@ def test_failed_json_cleanup_never_deletes_file_through_replaced_ancestor(
     finally:
         if changed:
             _set_windows_junction(parent, outside, remove=True)
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_posix_parent_creation_syncs_pinned_ancestors_and_propagates_failure(monkeypatch, existing):
+    """Simulated POSIX syscalls; this is not a native POSIX filesystem test."""
+    from types import SimpleNamespace
+
+    events = []
+    path = Path("C:/managed/archives") if sys.platform == "win32" else Path("/managed/archives")
+    handles = iter(range(10, 20))
+
+    def opening(name, flags, *, dir_fd=None):
+        fd = next(handles)
+        events.append(("open", name, dir_fd, fd))
+        return fd
+
+    def mkdir(name, mode, *, dir_fd):
+        events.append(("mkdir", name, dir_fd))
+        if existing:
+            raise FileExistsError()
+
+    def sync(fd):
+        events.append(("fsync", fd))
+        if fd == 11:
+            raise OSError("directory barrier failed")
+
+    monkeypatch.setattr(file_ops, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(file_ops, "_absolute", lambda p: p)
+    monkeypatch.setattr(file_ops, "os", SimpleNamespace(
+        O_RDONLY=0, O_DIRECTORY=1, O_NOFOLLOW=2, O_NONBLOCK=4,
+        open=opening, mkdir=mkdir, fsync=sync, close=lambda fd: events.append(("close", fd))))
+    with pytest.raises(OSError, match="barrier failed"):
+        file_ops.ensure_directory(path)
+    assert events[:7] == [
+        ("open", path.anchor, None, 10), ("mkdir", "managed", 10),
+        ("open", "managed", 10, 11), ("fsync", 10),
+        ("mkdir", "archives", 11), ("open", "archives", 11, 12), ("fsync", 11)]
+    assert events[7:] == [("close", 12), ("close", 11), ("close", 10)]
