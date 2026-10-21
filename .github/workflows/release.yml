@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -28,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag || github.sha }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -38,9 +40,13 @@ jobs:
       - name: Verify tag and main ancestry
         run: |
           set -euo pipefail
-          git rev-parse --verify "refs/tags/$RELEASE_TAG"
-          git fetch origin main --no-tags
-          git merge-base --is-ancestor HEAD FETCH_HEAD
+          if [[ "$GITHUB_REF_TYPE" == "tag" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            git rev-parse --verify "refs/tags/$RELEASE_TAG"
+            git fetch origin main --no-tags
+            git merge-base --is-ancestor HEAD FETCH_HEAD
+          else
+            RELEASE_TAG=$(python -c 'import tomllib; from pathlib import Path; print("v" + tomllib.loads(Path("redmine-mcp/pyproject.toml").read_text())["project"]["version"])')
+          fi
           python scripts/check_plugin_release.py "$RELEASE_TAG"
 
       - uses: astral-sh/setup-uv@v5
@@ -49,10 +55,11 @@ jobs:
         working-directory: redmine-mcp
         run: |
           uv sync --locked --all-groups
-          uv run ruff check src tests/test_plugin_installation.py tests/test_cli.py tests/test_docs_install_section.py
-          uv run pytest tests/test_plugin_installation.py tests/test_cli.py tests/test_docs_install_section.py -q
+          uv run ruff check .
+          uv run pytest -q -rs
 
       - name: Publish GitHub Release
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
