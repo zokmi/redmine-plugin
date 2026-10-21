@@ -186,7 +186,12 @@ def test_atomic_json_failure_before_replace_preserves_old_record(
     with pytest.raises(OSError, match="disk failure"):
         file_ops.atomic_json(path, {"new": True})
     assert path.read_bytes() == old
-    assert list(tmp_path.iterdir()) == [path]
+    if sys.platform == "win32":
+        retained = list(tmp_path.glob(".*.tmp"))
+        assert len(retained) == 1
+        assert json.loads(retained[0].read_text(encoding="utf-8")) == {"new": True}
+    else:
+        assert list(tmp_path.iterdir()) == [path]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows native handles")
@@ -240,9 +245,15 @@ def test_atomic_json_native_replace_failure_preserves_old_record(tmp_path: Path)
         with file_ops.open_regular(path), pytest.raises(OSError):
             file_ops.atomic_json(path, {"new": True})
     assert path.read_bytes() == b'{"old": true}'
-    assert list(tmp_path.iterdir()) == [path]
+    retained = list(tmp_path.glob(".*.tmp"))
+    if sys.platform == "win32":
+        assert len(retained) == 1
+        assert json.loads(retained[0].read_text(encoding="utf-8")) == {"new": True}
+    else:
+        assert list(tmp_path.iterdir()) == [path]
     file_ops.atomic_json(path, {"new": True})
     assert json.loads(path.read_text(encoding="utf-8")) == {"new": True}
+    assert list(tmp_path.glob(".*.tmp")) == retained
 
 
 def _set_windows_junction(directory: Path, target: Path, *, remove: bool = False) -> None:
@@ -357,3 +368,56 @@ def test_windows_lock_sharing_violation_is_contention(tmp_path: Path) -> None:
         api().CloseHandle(handle)
     with file_ops.try_lock(path) as acquired:
         assert acquired is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows failed-temp cleanup race")
+@pytest.mark.parametrize("failure_point", ["fsync", "replace"])
+def test_failed_json_cleanup_never_deletes_file_through_replaced_ancestor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    parent, outside = tmp_path / "parent", tmp_path / "outside"
+    parent.mkdir()
+    outside.mkdir()
+    original_close = os.close
+    temp_fd: int | None = None
+    temporary: Path | None = None
+    external: Path | None = None
+    changed = False
+
+    def fail_operation(fd: int, *args: object) -> None:
+        nonlocal temp_fd, temporary
+        temp_fd = fd
+        temporary = next(parent.iterdir())
+        raise OSError("injected atomic write failure")
+
+    def race_after_close(fd: int) -> None:
+        nonlocal external, changed
+        original_close(fd)
+        if fd == temp_fd and not changed:
+            assert temporary is not None
+            # 故障來源已關閉；另一行程移除 temp，將空父目錄改成 junction，
+            # 並在外部目錄放入相同名稱的檔案。清理不可刪除此檔案。
+            if temporary.exists():
+                temporary.unlink()
+            _set_windows_junction(parent, outside)
+            changed = True
+            external = outside / temporary.name
+            external.write_bytes(b"external data must survive")
+
+    if failure_point == "fsync":
+        monkeypatch.setattr(os, "fsync", fail_operation)
+    else:
+        monkeypatch.setattr(file_ops, "_replace_open_file", fail_operation)
+    monkeypatch.setattr(os, "close", race_after_close)
+    try:
+        with pytest.raises(OSError, match="injected atomic write failure"):
+            file_ops.atomic_json(parent / "record.json", {"new": True})
+        assert changed
+        assert external is not None
+        assert external.exists(), "failure cleanup deleted an external file"
+        assert external.read_bytes() == b"external data must survive"
+    finally:
+        if changed:
+            _set_windows_junction(parent, outside, remove=True)

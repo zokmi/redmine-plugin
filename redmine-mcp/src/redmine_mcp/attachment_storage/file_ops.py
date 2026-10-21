@@ -236,11 +236,10 @@ def atomic_json(path: Path, payload: dict[str, object]) -> None:
                 replaced = True
         finally:
             os.close(fd)
-            if not replaced:
+            # Windows retains failed temporaries: a pathname cleanup after close
+            # could follow an ancestor replaced with a junction into external data.
+            if not replaced and sys.platform != "win32":
                 try:
-                    if sys.platform == "win32":
-                        temporary.unlink()
-                    else:
-                        os.unlink(temporary.name, dir_fd=parent_fd)
+                    os.unlink(temporary.name, dir_fd=parent_fd)
                 except FileNotFoundError:
                     pass
