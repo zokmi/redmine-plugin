@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import stat
@@ -243,3 +244,102 @@ def atomic_json(path: Path, payload: dict[str, object]) -> None:
                     os.unlink(temporary.name, dir_fd=parent_fd)
                 except FileNotFoundError:
                     pass
+
+
+def ensure_directory(path: Path) -> None:
+    """相對固定祖先逐層建立管理目錄，拒絕既有連結及非目錄。"""
+    path = _absolute(path)
+    with ExitStack() as stack:
+        if sys.platform == "win32":
+            parent = _windows.open_handle(Path(path.anchor), 0x80 | 0x20, 3, directory=True)
+            stack.callback(_windows.api().CloseHandle, parent)
+            for index in range(1, len(path.parts)):
+                parent = _windows.open_handle(
+                    Path(*path.parts[: index + 1]),
+                    0x80 | 0x20,
+                    4,
+                    directory=True,
+                    parent=parent,
+                )
+                stack.callback(_windows.api().CloseHandle, parent)
+        else:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+            parent = os.open(path.anchor, flags)
+            stack.callback(os.close, parent)
+            for component in path.parts[1:]:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=parent)
+                except FileExistsError:
+                    pass
+                parent = os.open(component, flags, dir_fd=parent)
+                stack.callback(os.close, parent)
+
+
+@contextmanager
+def create_regular(path: Path) -> Iterator[BinaryIO]:
+    """建立唯一下載半成品並在 context 期間固定其檔案與祖先。"""
+    with _parent(path) as (path, parent_fd):
+        fd = _open_fd(path, parent_fd, write=True, create=True, exclusive=True)
+        with os.fdopen(fd, "r+b") as stream:
+            yield stream
+
+
+def publish_regular(
+    temporary: Path, target: Path, *, identity: tuple[int, int] | None = None
+) -> tuple[int, str]:
+    """只發布同目錄的套件下載半成品；不覆寫既有項目、不清除失敗檔案。"""
+    temporary, target = _absolute(temporary), _absolute(target)
+    if temporary.parent != target.parent or temporary == target:
+        raise OSError(errno.EINVAL, "發布必須使用同目錄的不同檔名")
+    with _parent(temporary) as (temporary, parent_fd):
+        fd = _open_fd(temporary, parent_fd, write=True, rename=True)
+        try:
+            info = os.fstat(fd)
+            if identity is not None and (info.st_dev, info.st_ino) != identity:
+                raise OSError(errno.ESTALE, "下載半成品識別資訊已變更")
+            digest, size = hashlib.sha256(), 0
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                while chunk := stream.read(1024 * 1024):
+                    digest.update(chunk)
+                    size += len(chunk)
+            os.fsync(fd)
+            if sys.platform == "win32":
+                import msvcrt
+
+                assert parent_fd is not None
+                _windows.replace_open_file(
+                    msvcrt.get_osfhandle(fd), target.name, parent_fd, replace=False
+                )
+            else:
+                source_info = os.fstat(fd)
+
+                def matches(name: str) -> bool:
+                    info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    return stat.S_ISREG(info.st_mode) and (
+                        info.st_dev, info.st_ino
+                    ) == (source_info.st_dev, source_info.st_ino)
+
+                if not matches(temporary.name):
+                    raise OSError(errno.ESTALE, "下載半成品已變更")
+                os.link(
+                    temporary.name,
+                    target.name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if not matches(target.name) or not matches(temporary.name):
+                    raise OSError(errno.ESTALE, "發布項目已變更，保留現有檔案")
+                os.unlink(temporary.name, dir_fd=parent_fd)
+            return size, digest.hexdigest()
+        finally:
+            os.close(fd)
+
+
+@contextmanager
+def open_regular_writer(path: Path) -> Iterator[BinaryIO]:
+    """相對固定祖先開啟既有一般檔案，呼叫者驗證識別資訊後才可寫入。"""
+    with _parent(path) as (path, parent_fd):
+        fd = _open_fd(path, parent_fd, write=True)
+        with os.fdopen(fd, "r+b") as stream:
+            yield stream

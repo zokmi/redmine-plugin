@@ -94,7 +94,9 @@ if sys.platform == "win32":
         dll.RtlNtStatusToDosError.restype = wintypes.ULONG
         return dll
 
-    def _relative_handle(name: str, parent: int, access: int, disposition: int) -> int:
+    def _relative_handle(
+        name: str, parent: int, access: int, disposition: int, *, directory: bool | None = False
+    ) -> int:
         buffer = ctypes.create_unicode_buffer(name)
         length = len(name.encode("utf-16-le"))
         unicode_name = _UnicodeString(length, length + 2, ctypes.cast(buffer, wintypes.LPWSTR))
@@ -117,7 +119,7 @@ if sys.platform == "win32":
             0,
             0x1 | 0x2,
             {1: 2, 3: 1, 4: 3}[disposition],
-            0x20 | 0x200000 | 0x4000,
+            0x20 | 0x200000 | 0x4000 | (1 if directory is True else 0),
             None,
             0,
         )
@@ -148,7 +150,7 @@ if sys.platform == "win32":
             if handle == ctypes.c_void_p(-1).value:
                 raise ctypes.WinError(ctypes.get_last_error())
         else:
-            handle = _relative_handle(path.name, parent, access, disposition)
+            handle = _relative_handle(path.name, parent, access, disposition, directory=directory)
         try:
             info = _FileInfo()
             if not api().GetFileInformationByHandle(handle, ctypes.byref(info)):
@@ -162,7 +164,9 @@ if sys.platform == "win32":
             raise
         return int(handle)
 
-    def replace_open_file(handle: int, name: str, parent: int) -> None:
+    def replace_open_file(
+        handle: int, name: str, parent: int, *, replace: bool = True
+    ) -> None:
         class RenameInfo(ctypes.Structure):
             _fields_ = [
                 ("replace", wintypes.BOOL),
@@ -171,7 +175,7 @@ if sys.platform == "win32":
                 ("name", wintypes.WCHAR * (len(name.encode("utf-16-le")) // 2 + 1)),
             ]
 
-        info = RenameInfo(1, parent, len(name.encode("utf-16-le")), name)
+        info = RenameInfo(int(replace), parent, len(name.encode("utf-16-le")), name)
         status = _IoStatus()
         result = _nt_api().NtSetInformationFile(
             handle,
