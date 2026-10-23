@@ -22,6 +22,7 @@ _BASE_INSTRUCTIONS = (
     "單別、階段、落點與子單規則以它為準。"
     "更新前讀完整原文；summary=true 的摘要不可直接覆寫 description。"
     "journals_next_offset 表示仍有更早紀錄；需求查核需分批讀完相關討論，不可把截斷當作完整。\n"
+    "驗證截圖提供或上傳前，依 skill 交唯讀子代理實際看圖、逐條核對說明；全部 PASS 才放行。"
     "附件用 upload_attachment：file_path 可直接讀取使用者提供的普通檔案路徑；"
     "對話附件僅在主程式實際提供可讀本機路徑時可用，"
     "否則請取得路徑或使用 content_base64。"

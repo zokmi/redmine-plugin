@@ -44,6 +44,8 @@ description: 當使用者要開單、撰寫或整理 Redmine 臭蟲（bug）、�
 有 upload_attachment 且使用者授權附圖時，上傳後以 token、回傳 filename 帶入寫入工具的 uploads；圖片內嵌由工具處理。
 沒有工具或無法讀取圖片時，說明需手動附檔並描述圖片位置。未完成上傳不宣稱完成，也不捏造附件引用。
 
+驗證截圖提供或上傳前，須由唯讀子代理實際逐圖檢視並逐條核對說明；全部適用條目 PASS 才放行。無法審查、證據不足或圖片／說明變更時須補驗複審。詳細規則見 references/bdd-verification-note.md。
+
 ### BDD 驗證註記
 
 BDD 全通過後給 PM 的註記只呈現「修正項目 N／結果／圖片 N」；根因、Scenario、commit、檔案行號與一致性審核細節留在 BDD 報告，API／DB 沒有截圖時使用替代驗證結果。完整格式見 `references/bdd-verification-note.md`。

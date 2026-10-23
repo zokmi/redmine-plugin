@@ -1,7 +1,7 @@
 """harnesses.tsv 的結構驗證。
 
-這張表是 install.sh 與 install.ps1 共用的唯一資料來源。表壞了兩支腳本一起壞，
-所以先驗表，再驗腳本行為。
+這張表保留歷史 harness 分類供相容性查核；現行安裝由 plugin 管理器負責。
+本測試驗證保留資料的結構，不代表仍提供舊安裝腳本。
 """
 from __future__ import annotations
 
