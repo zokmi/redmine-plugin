@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -12,7 +13,8 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 
-async def test_parallel_sessions_share_one_service(tmp_path: Path) -> None:
+@pytest.mark.parametrize("runtime", ["python", "node"])
+async def test_parallel_sessions_share_one_service(tmp_path: Path, runtime: str) -> None:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -32,6 +34,12 @@ async def test_parallel_sessions_share_one_service(tmp_path: Path) -> None:
         "PYTHONUTF8": "1",
     }
     command = [sys.executable, "-m", "redmine_mcp", "serve", "--port", str(port)]
+    if runtime == "node":
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("Node.js is unavailable")
+        script = Path(__file__).resolve().parents[2] / "scripts" / "local-service.mjs"
+        command = [node, str(script), sys.executable, str(port)]
     url = f"http://127.0.0.1:{port}/mcp"
     headers = {"Authorization": f"Bearer {token}"}
     ready = asyncio.Event()
@@ -62,6 +70,9 @@ async def test_parallel_sessions_share_one_service(tmp_path: Path) -> None:
                     try:
                         response = await http.get(url)
                     except httpx.TransportError:
+                        await asyncio.sleep(0.1)
+                        continue
+                    if response.status_code == 503:
                         await asyncio.sleep(0.1)
                         continue
                     assert response.status_code == 401

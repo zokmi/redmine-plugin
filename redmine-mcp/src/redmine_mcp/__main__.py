@@ -5,6 +5,7 @@ import asyncio
 import logging
 import socket
 import sys
+from collections.abc import Callable
 from hmac import compare_digest
 from typing import TYPE_CHECKING
 
@@ -24,7 +25,10 @@ if TYPE_CHECKING:
 STARTED_MESSAGE = "Redmine MCP server 啟動，站台：%s"
 
 
-def _run_local_http(mcp: MCPServer, port: int, max_attachment_bytes: int, token: str) -> None:
+def _run_local_http(
+    mcp: MCPServer, port: int, max_attachment_bytes: int, token: str,
+    ready: Callable[[int], None] | None = None,
+) -> None:
     """先取得唯一監聽 socket，再啟動 MCP 與附件清理。"""
     import uvicorn
 
@@ -61,15 +65,26 @@ def _run_local_http(mcp: MCPServer, port: int, max_attachment_bytes: int, token:
                     return
             await app(scope, receive, send)
 
+        actual_port = listener.getsockname()[1]
+
+        class LocalServer(uvicorn.Server):
+            async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+                await super().startup(sockets=sockets)
+                if self.started and ready is not None:
+                    ready(actual_port)
+
         config = uvicorn.Config(
-            authenticated, host=LOCAL_HOST, port=port, workers=1, access_log=False,
+            authenticated, host=LOCAL_HOST, port=actual_port, workers=1, access_log=False,
             ws="none",
         )
-        logging.info("Redmine MCP 共用端點 http://%s:%s/mcp", LOCAL_HOST, port)
-        uvicorn.Server(config).run(sockets=[listener])
+        logging.info("Redmine MCP 共用端點 http://%s:%s/mcp", LOCAL_HOST, actual_port)
+        LocalServer(config).run(sockets=[listener])
 
 
-def main(*, local_token: str | None = None, port: int = LOCAL_PORT) -> None:
+def main(
+    *, local_token: str | None = None, port: int = LOCAL_PORT,
+    ready: Callable[[int], None] | None = None,
+) -> None:
     """載入設定並以 stdio 或本機 Streamable HTTP 執行。
 
     所有訊息一律輸出到 stderr；stdout 是 MCP 協定通道，寫入會破壞協定。
@@ -101,7 +116,7 @@ def main(*, local_token: str | None = None, port: int = LOCAL_PORT) -> None:
         else:
             _run_local_http(
                 mcp, port, max(site.max_attachment_bytes for site in settings.sites.values()),
-                local_token,
+                local_token, ready,
             )
     finally:
         # mcp.run() 自行管理事件迴圈且會在返回時關閉它，因此收尾要另起一個迴圈。

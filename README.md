@@ -54,9 +54,9 @@ Codex 與 Claude 的 Redmine plugin 都連到 `http://127.0.0.1:18765/mcp`。服
 & '<已安裝 plugin 根目錄>/scripts/install-local-service.ps1'
 ```
 
-腳本需要 `uv`，會把服務與依賴安裝到目前使用者的 `%LOCALAPPDATA%\redmine-mcp\service`，再註冊該使用者的 `Redmine MCP (<SID>)` 排程工作。工作在登入時啟動，執行期間忽略重複觸發，程序退出後由每分鐘的觸發補啟。關閉 Claude、Codex 或 PowerShell 視窗後，工作會繼續執行。
+腳本需要 Node.js 22 以上和 `uv`，會把服務與依賴安裝到目前使用者的 `%LOCALAPPDATA%\redmine-mcp\service`，並無視窗啟動 Node.js。Node.js 持有共用端點並管理內部 Python 工具程序。關閉 Claude、Codex 或 PowerShell 後，Node.js 仍會在目前的 Windows 登入階段持續提供服務。登出、重開機或程序退出後，可重新執行腳本啟動。
 
-更新先準備新版本，準備成功才更新排程工作。已在執行的服務可繼續使用原有檔案，下次啟動載入新版。若前景 `serve` 已在監聽，排程會在該程序退出後接手 18765。
+腳本會印出 Node.js 的 PID 與日誌位置。更新時，先確認 PID 對應 Redmine MCP，結束該程序後執行新版腳本。若從前景 `serve` 切換，先結束前景程序。若舊版曾建立 `Redmine MCP (<SID>)` 工作，先在工作排程器停用並結束該工作，釋出 18765。
 
 腳本沿用使用者的 `REDMINE_MCP_LOCAL_TOKEN`，首次安裝才在缺少權杖時建立。首次建立後請完整重開兩個客戶端，必要時重新登入 Windows，讓客戶端取得權杖。權杖與 Redmine API 金鑰分開。
 
@@ -70,7 +70,7 @@ uvx --python 3.13 --from '<已安裝 plugin 根目錄>/redmine-mcp' redmine-mcp 
 
 ## 更新與移除
 
-安裝、更新及排錯時，禁止關閉、停止、重啟或終止 `mcp.exe`、`redmine-mcp.exe`、Redmine MCP 共用服務及其排程工作。遇到檔案鎖定、連線失敗或連接埠占用，先查詢程序、排程與連線狀態，再回報仍存在的阻礙。
+遇到連接埠占用時，先確認監聽程序的身分。切換或更新共用服務會中斷連線，請選擇兩個客戶端都沒有進行 Redmine 操作的時段。
 
 新版本發布後，透過 plugin 管理器更新 marketplace 與 plugin，重開工具載入新版本。發布前同步更新 `plugin.json`、`.claude-plugin/plugin.json`、`.codex-plugin/plugin.json` 與 `redmine-mcp/pyproject.toml` 的版本，避免舊版本快取。
 

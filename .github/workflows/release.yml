@@ -37,6 +37,13 @@ jobs:
         with:
           python-version: '3.13'
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check Node.js launcher syntax
+        run: node --check scripts/local-service.mjs
+
       - name: Verify tag and main ancestry
         run: |
           set -euo pipefail
