@@ -10,6 +10,14 @@ def test_help_列出設定與_config_子命令():
     assert result.exit_code == 0
     assert "setup" in result.stdout
     assert "config" in result.stdout
+    assert "serve" in result.stdout
+
+
+def test_serve_requires_local_token(monkeypatch):
+    monkeypatch.delenv("REDMINE_MCP_LOCAL_TOKEN", raising=False)
+    result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 2
+    assert "REDMINE_MCP_LOCAL_TOKEN" in result.output
 
 
 def test_setup_只建立參數檔不註冊_mcp(monkeypatch):

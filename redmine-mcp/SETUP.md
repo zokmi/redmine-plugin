@@ -1,6 +1,6 @@
 # Redmine MCP 設定
 
-Redmine MCP 由本套件的 plugin 啟動。請先依根目錄 [README](../README.md) 安裝 plugin；本文件只說明站台參數，不提供獨立安裝、ZIP 安裝或手動 MCP 註冊流程。
+Codex 與 Claude 的 plugin 都連到同一個本機 Redmine MCP 服務。請先依根目錄 [README](../README.md) 安裝 plugin 並設定共用服務；本文件只說明站台參數與連線排錯。
 
 ## 建立參數檔
 
@@ -55,13 +55,13 @@ uvx --python 3.13 --from "<已安裝 plugin 根目錄>/redmine-mcp" redmine-mcp 
 
 ## Plugin 啟動疑難排解
 
-確認 `uvx` 在 Claude Code 或 Codex 的 PATH，並從 plugin 管理介面重新啟用 Redmine。再重開工具，在 `/mcp` 或 MCP 清單確認 server 已連線。若 server 啟動失敗，可直接執行：
+確認執行服務的終端機能使用 `uvx`，並且服務與兩個客戶端都取得同一份 `REDMINE_MCP_LOCAL_TOKEN`。服務固定監聽本機 loopback，兩個 plugin 的預設連接埠為 `18765`。
 
 ```powershell
-uvx --python 3.13 --from "<已安裝 plugin 根目錄>/redmine-mcp" redmine-mcp
+uvx --python 3.13 --from "<已安裝 plugin 根目錄>/redmine-mcp" redmine-mcp serve
 ```
 
-這個命令只作為診斷，不是另一種安裝方式。若顯示設定錯誤，確認參數檔存在、TOML 語法正確，且每個站台都有 `url` 與 `api_key`。
+若顯示設定錯誤，確認參數檔存在、TOML 語法正確，且每個站台都有 `url` 與 `api_key`。修改站台設定後重啟共用服務，使所有工作階段讀到新設定。若遇到 401，確認服務和客戶端都繼承了相同權杖。若連接埠已被占用，確認既有監聽者是否為共用服務。
 
 ## 更新與移除
 

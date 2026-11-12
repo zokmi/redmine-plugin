@@ -5,19 +5,31 @@
 """
 from __future__ import annotations
 
+import os
+import re
+from typing import Annotated
+
 import typer
 
-#: Typer 應用程式本體；只保留一個子命令，但刻意加上 callback（見下）避免被
-#: Typer 攤平成單命令模式。
+from redmine_mcp.server import LOCAL_PORT
+
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
 
 @app.callback()
 def _root() -> None:
     """Redmine MCP server。不帶參數時以 stdio 啟動 server，供 MCP client 使用。"""
-    # 這個 callback 什麼都不做，但**不能刪**：Typer 在「只有一個命令且沒有 callback」
-    # 時會把那個命令當成 app 本身，於是 `redmine-mcp setup` 會被當成多餘的參數而失敗。
-    # 加上 callback 才會維持 `<程式> <子命令>` 的結構，日後加第二個命令也不必再調整。
+
+
+@app.command()
+def serve(port: Annotated[int, typer.Option(min=1, max=65535)] = LOCAL_PORT) -> None:
+    """啟動 Codex 與 Claude 共用的本機 MCP 服務。"""
+    from redmine_mcp.__main__ import main
+
+    token = os.environ.get("REDMINE_MCP_LOCAL_TOKEN", "")
+    if re.fullmatch(r"[A-Za-z0-9_-]{32,}", token) is None:
+        raise typer.BadParameter("REDMINE_MCP_LOCAL_TOKEN 需要至少 32 字元的 URL 安全權杖。")
+    main(local_token=token, port=port)
 
 
 @app.command()

@@ -27,7 +27,8 @@ def test_plugin_loads_all_maintained_skills(platform):
         assert entry.is_file(), entry
         assert entry.read_text(encoding="utf-8").startswith("---\n")
     config = json.loads((ROOT / manifest["mcpServers"]).read_text(encoding="utf-8"))
-    assert config["mcpServers"]["redmine"]["command"] == "uvx"
+    assert config["mcpServers"]["redmine"]["url"] == "http://127.0.0.1:18765/mcp"
+    assert "command" not in config["mcpServers"]["redmine"]
 
 
 def test_compatibility_readme_routes_installation_to_plugin():

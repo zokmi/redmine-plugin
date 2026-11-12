@@ -11,7 +11,7 @@
 
 ## 前置需求
 
-安裝支援 plugin 的 Claude Code 或 Codex，以及 [uv](https://docs.astral.sh/uv/getting-started/installation/)。`uvx` 必須在該工具的 PATH 中；Python 3.13 與 MCP 相依套件由 uv 管理。MCP 使用 plugin 內附原始碼，不從 GitHub 抓另一份 server。
+安裝支援 plugin 的 Claude Code 或 Codex，以及提供 `uvx` 的 [uv 套件](https://docs.astral.sh/uv/getting-started/installation/)。在執行設定與共用服務的終端機確認 `uvx --version` 可執行。Python 3.13 與 MCP 相依套件由 `uvx` 按需準備，服務使用 plugin 內附原始碼。
 
 ## 安裝到 Claude Code
 
@@ -42,10 +42,29 @@ codex plugin add redmine@redmine-plugins
 設定只寫入站台參數，不安裝獨立工具、不複製 skills、不執行 `claude mcp add`。
 金鑰保存在 plugin 目錄外：Windows `%APPDATA%\redmine-mcp\config.toml`；macOS／Linux `~/.config/redmine-mcp/config.toml`（有 `XDG_CONFIG_HOME` 時沿用）。更新或移除 plugin 不會刪除站台設定。
 
-設定完成後重開工具，Claude 用 `/mcp`、Codex 用 plugins／MCP 清單檢查連線，再呼叫 `get_current_user` 驗證站台。
-首次尚未設定時 MCP 可能顯示連線失敗，仍可使用初始化 skill。詳細欄位與排錯見 [SETUP.md](redmine-mcp/SETUP.md)。
+## 啟動本機共用服務
 
-Marketplace 從 GitHub 取得；MCP 仍由 plugin 內附原始碼在本機執行，需能連線到 Redmine。
+Codex 與 Claude 的 Redmine plugin 都連到 `http://127.0.0.1:18765/mcp`。服務啟動一次後，可同時開啟兩個工具的多個工作階段。升級時先將兩邊的 plugin 更新到支援共用服務的版本，並結束舊工作階段，讓原有 stdio 程序退出。
+
+Windows PowerShell 首次執行下列命令，建立目前使用者專用的本機連線權杖。權杖與 Redmine API 金鑰分開，應只留在使用者環境中。
+
+```powershell
+$redmineLocalToken = [Environment]::GetEnvironmentVariable('REDMINE_MCP_LOCAL_TOKEN', 'User')
+if (-not $redmineLocalToken) {
+    $redmineTokenBytes = New-Object byte[] 32
+    $redmineTokenGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $redmineTokenGenerator.GetBytes($redmineTokenBytes) }
+    finally { $redmineTokenGenerator.Dispose() }
+    $redmineLocalToken = ([BitConverter]::ToString($redmineTokenBytes)).Replace('-', '')
+    [Environment]::SetEnvironmentVariable('REDMINE_MCP_LOCAL_TOKEN', $redmineLocalToken, 'User')
+}
+$env:REDMINE_MCP_LOCAL_TOKEN = $redmineLocalToken
+uvx --python 3.13 --from '<已安裝 plugin 根目錄>/redmine-mcp' redmine-mcp serve
+```
+
+macOS／Linux 可執行 `export REDMINE_MCP_LOCAL_TOKEN="$(openssl rand -hex 32)"`，再以同一份權杖啟動服務及兩個客戶端。Windows 設定權杖後，從已載入新環境的程序完整重開 Codex 與 Claude。若仍讀到舊環境，重新登入 Windows。服務所在的終端機需保持開啟，以 Ctrl+C 停止。
+
+啟動後在 Claude 的 `/mcp`、Codex 的 MCP 清單確認連線，再呼叫 `get_current_user` 驗證站台。第二次執行 `serve` 會回報連接埠已被占用。詳細欄位與排錯見 [SETUP.md](redmine-mcp/SETUP.md)。
 
 ## 更新與移除
 

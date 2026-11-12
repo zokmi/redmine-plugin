@@ -1,6 +1,6 @@
 [project]
 name = "redmine-mcp"
-version = "0.15.0"
+version = "0.16.0"
 description = "MCP server for Redmine REST API"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=2.0,<3",
+    "uvicorn>=0.31,<1",
     # 上界不可省略：uv.lock 只約束本專案的開發環境，使用者以 uvx／pip 安裝時解析的是
     # 這裡的範圍。而 pycurl_transport 的正確性建立在 httpx 的具體行為上——
     # AsyncBaseTransport 介面、`request.headers.raw` 保留原始大小寫（那正是本模組

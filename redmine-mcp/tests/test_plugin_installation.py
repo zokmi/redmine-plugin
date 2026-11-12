@@ -34,13 +34,18 @@ def test_plugin_manifests_and_marketplaces():
             assert source == {"source": "github", "repo": "zokmi/redmine-plugin", "ref": "main"}
         else:
             assert source == {"source": "url", "url": "https://github.com/zokmi/redmine-plugin.git", "ref": "main"}
+    assert "$schema" not in manifests[0]
     for manifest in manifests[1:]:
-        config = json.loads((ROOT / manifest["mcpServers"]).read_text(encoding="utf-8"))
+        path = manifest["mcpServers"]
+        config = json.loads((ROOT / path).read_text(encoding="utf-8"))
         server = config["mcpServers"]["redmine"]
-        assert server["command"] == "uvx"
-        assert "--from" in server["args"]
-        assert server["args"][-1] == "redmine-mcp"
-        assert not any("github.com" in arg for arg in server["args"])
+        assert server["url"] == "http://127.0.0.1:18765/mcp"
+        assert "command" not in server
+        if Path(path).as_posix() == "mcp/claude.json":
+            assert server["type"] == "http"
+            assert server["headers"]["Authorization"] == "Bearer ${REDMINE_MCP_LOCAL_TOKEN}"
+        else:
+            assert server["bearer_token_env_var"] == "REDMINE_MCP_LOCAL_TOKEN"
 
 
 def test_setup_skill_uses_installed_root_and_private_terminal_input():

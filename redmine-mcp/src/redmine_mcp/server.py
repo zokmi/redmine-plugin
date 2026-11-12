@@ -13,6 +13,8 @@ from redmine_mcp.sites import SiteRegistry
 from redmine_mcp.tools import attachments, issues, metadata, projects
 
 SERVER_NAME = "redmine"
+LOCAL_HOST = "127.0.0.1"
+LOCAL_PORT = 18765
 #: 對 MCP client 宣告的版本；與套件版本一致，不另行維護。
 SERVER_VERSION = __version__
 _BASE_INSTRUCTIONS = (

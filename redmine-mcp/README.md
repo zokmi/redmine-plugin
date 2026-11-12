@@ -2,7 +2,7 @@
 
 這個 MCP server 是根目錄 Redmine plugin 的執行元件，提供 Redmine issue、專案、附件與 metadata 的查詢及維護能力，共 16 個工具，支援多個 Redmine 站台。
 
-請先依 [根目錄 README](../README.md) 透過 Claude Code 或 Codex 安裝 plugin，再依 [SETUP.md](SETUP.md) 建立站台參數。這個目錄不提供獨立安裝流程；plugin 會以 `uvx --from` 載入這份原始碼。
+請先依 [根目錄 README](../README.md) 安裝 plugin，再依 [SETUP.md](SETUP.md) 建立站台參數。用 `uvx --from` 載入外掛內附套件並執行 `redmine-mcp serve`，即可讓 Claude Code 和 Codex 連到同一個本機服務。
 
 ## 設定
 

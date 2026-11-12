@@ -890,7 +890,7 @@ wheels = [
 
 [[package]]
 name = "redmine-mcp"
-version = "0.15.0"
+version = "0.16.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -899,6 +899,7 @@ dependencies = [
     { name = "questionary" },
     { name = "rich" },
     { name = "typer" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -917,6 +918,7 @@ requires-dist = [
     { name = "questionary", specifier = ">=2,<3" },
     { name = "rich", specifier = ">=13,<16" },
     { name = "typer", specifier = ">=0.21,<1" },
+    { name = "uvicorn", specifier = ">=0.31,<1" },
 ]
 
 [package.metadata.requires-dev]
