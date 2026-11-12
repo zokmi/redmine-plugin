@@ -473,7 +473,7 @@ def test_same_filename_archives_are_isolated_and_external_source_is_untouched(tm
     store, times, path, record, archive = setup_item(tmp_path)
     external = tmp_path / "external.bin"
     external.write_bytes(b"external original")
-    with store.borrow_source(external, 100) as source:
+    with store.borrow_source(external, 100, upload_root=tmp_path) as source:
         assert source == b"external original"
     with store.begin_download("https://example.test", "report.bin") as pending:
         with pending.open_writer() as output:

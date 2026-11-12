@@ -18,13 +18,28 @@ from io import BytesIO
 import anyio
 import httpx
 import pycurl
+from anyio.lowlevel import RunVar
 
 #: 佇列結束哨符：生產者放進佇列表示 body 已全部送完（非例外中止）。
 _SENTINEL = object()
 
+# 同一事件迴圈的所有站台共用下載額度，工單查詢使用 AnyIO 的預設額度。
+_DOWNLOAD_LIMITER: RunVar[anyio.CapacityLimiter] = RunVar("redmine_download_limiter")
+
+
+def _download_limiter() -> anyio.CapacityLimiter:
+    try:
+        return _DOWNLOAD_LIMITER.get()
+    except LookupError:
+        limiter = anyio.CapacityLimiter(4)
+        _DOWNLOAD_LIMITER.set(limiter)
+        return limiter
+
 #: 單次請求可覆寫逾時與大小上限的 `httpx.Request.extensions` 鍵名。
 EXT_TOTAL_TIMEOUT = "redmine_total_timeout"
 EXT_MAX_FILESIZE = "redmine_max_filesize"
+
+DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 #: 不轉發給 libcurl 的 request header；host/content-length 等由 libcurl 自算。
 _SKIP_REQUEST_HEADERS = frozenset(
@@ -63,6 +78,10 @@ class CurlFileSizeExceeded(CurlError):
 
     這不是連線問題，呼叫端應轉譯成「附件過大」而非「連線失敗」。
     """
+
+
+class CurlResponseSizeExceeded(CurlError):
+    """一般 API 的回應內容超過解壓後的大小上限。"""
 
 
 def _pycurl_failure(code: object) -> CurlError:
@@ -191,20 +210,26 @@ class _QueueByteStream(httpx.AsyncByteStream):
     消費端已停讀）。release callback（見 _streaming_request）負責安全地中止並
     等待背景執行緒真正結束，避免 handle 被併發操作或執行緒洩漏。
 
-    註：本類別假設事件迴圈為 asyncio（server 以 anyio.run 的預設 asyncio
-    backend 啟動），故消費端可放心用 anyio.to_thread 搭配 asyncio 佇列消費模式；
-    若日後改用 trio backend，需重寫 _streaming_request 內以 asyncio 原語
-    （call_soon_threadsafe、ensure_future）通知主端的部分。
+    消費端以事件等待新資料，取出資料時不占用 worker。
     """
 
-    def __init__(self, q: queue.Queue[object], release: Callable[[], Awaitable[None]]) -> None:
+    def __init__(
+        self, q: queue.Queue[object], ready: asyncio.Event,
+        release: Callable[[], Awaitable[None]],
+    ) -> None:
         self._q = q
+        self._ready = ready
         self._release = release  # 讀完/關閉時安全歸還 handle 的 callback（冪等、async）
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         try:
             while True:
-                item = await anyio.to_thread.run_sync(self._q.get)
+                self._ready.clear()
+                try:
+                    item = self._q.get_nowait()
+                except queue.Empty:
+                    await self._ready.wait()
+                    continue
                 if item is _SENTINEL:
                     return
                 if isinstance(item, pycurl.error):
@@ -235,18 +260,25 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
         total_timeout: float = 60.0,
         pool_size: int = 4,
         pool_wait: float = 30.0,
+        *,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
+        if max_response_bytes <= 0:
+            raise ValueError("max_response_bytes 必須大於 0")
+        self._max_response_bytes = max_response_bytes
         self._connect_timeout = connect_timeout
         self._pool_wait = pool_wait
         self._total_timeout = total_timeout
         self._pool: asyncio.LifoQueue[pycurl.Curl] = asyncio.LifoQueue()
+        self._download_pool: asyncio.LifoQueue[pycurl.Curl] = asyncio.LifoQueue()
         for _ in range(pool_size):
             self._pool.put_nowait(_new_handle())
+            self._download_pool.put_nowait(_new_handle())
         # 串流下載背景 perform() 的 task 參照；只為避免被 GC 提前回收，由各自的
         # release() 在確認執行緒結束後透過 done callback 清除，不需外部使用。
         self._pending: set[asyncio.Task[None]] = set()
 
-    async def _take_handle(self) -> pycurl.Curl:
+    async def _take_handle(self, pool: asyncio.LifoQueue[pycurl.Curl]) -> pycurl.Curl:
         """從池中取一顆 handle；等太久就以明確錯誤結束。
 
         縱深防禦：正常情況下 handle 一定會被歸還（見 _return_handle），池不會耗盡。
@@ -254,14 +286,17 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
         必須重啟 server 才能恢復——那是最難診斷的失敗形態。寧可以可讀的錯誤結束。
         """
         try:
-            return await asyncio.wait_for(self._pool.get(), self._pool_wait)
+            return await asyncio.wait_for(pool.get(), self._pool_wait)
         except TimeoutError as exc:
             raise CurlError(
                 "連線資源忙碌逾時：本站台的連線都還在使用中。"
                 "請稍後重試；若持續發生請回報，這通常代表 server 內部的連線未被正確釋放"
             ) from exc
 
-    def _return_handle(self, h: pycurl.Curl, perform_task: asyncio.Task[None] | None) -> None:
+    def _return_handle(
+        self, h: pycurl.Curl, perform_task: asyncio.Task[None] | None,
+        pool: asyncio.LifoQueue[pycurl.Curl],
+    ) -> None:
         """歸還 handle；背景執行緒仍在使用它時改為延後丟棄並補一個新 handle。
 
         anyio.to_thread 的 worker thread 無法被中斷：請求被取消時（fan_out 的
@@ -276,9 +311,9 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
         少一顆，耗盡後無界的 _pool.get() 會讓該站所有請求永久掛住。
         """
         if perform_task is None or perform_task.done():
-            self._pool.put_nowait(h)
+            pool.put_nowait(h)
             return
-        self._pool.put_nowait(_new_handle())
+        pool.put_nowait(_new_handle())
         self._pending.add(perform_task)
         perform_task.add_done_callback(self._pending.discard)
         perform_task.add_done_callback(lambda _: h.close())
@@ -313,12 +348,21 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
         return await self._buffered_request(request, body)
 
     async def _buffered_request(self, request: httpx.Request, body: bytes) -> httpx.Response:
-        """一般 API 請求：body 全 buffer，perform() 跑完才回。"""
-        h = await self._take_handle()
+        """一般 API 請求：在解壓後的大小上限內緩衝回應。"""
+        h = await self._take_handle(self._pool)
         perform_task: asyncio.Task[None] | None = None
         try:
             collector = _HeaderCollector()
             buf = BytesIO()
+            exceeded_limit = False
+
+            def on_write(data: bytes) -> int:
+                nonlocal exceeded_limit
+                # libcurl 解壓後才呼叫此函式，因此也能限制 gzip 等壓縮回應。
+                if buf.tell() + len(data) > self._max_response_bytes:
+                    exceeded_limit = True
+                    return 0
+                return buf.write(data)
 
             def run() -> None:
                 # curl_easy_reset 會清掉先前設定的選項，但保留 live connections／
@@ -331,7 +375,7 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
                 # 刻意不設 FOLLOWLOCATION（不跟隨轉址）、不關 TLS 驗證。
                 self._configure(h, request, body)
                 h.setopt(pycurl.HEADERFUNCTION, collector.feed)
-                h.setopt(pycurl.WRITEFUNCTION, buf.write)
+                h.setopt(pycurl.WRITEFUNCTION, on_write)
                 h.perform()
 
             # shield：外層取消時不連帶取消這個 task，讓它跑到執行緒真正結束，
@@ -340,6 +384,10 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
             try:
                 await asyncio.shield(perform_task)
             except pycurl.error as exc:
+                if exceeded_limit and exc.args[0] == pycurl.E_WRITE_ERROR:
+                    raise CurlResponseSizeExceeded(
+                        f"Redmine API 回應超過 {self._max_response_bytes:,} 位元組上限"
+                    ) from exc
                 raise _pycurl_failure(exc.args[0]) from exc
 
             return httpx.Response(
@@ -349,7 +397,7 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
                 request=request,
             )
         finally:
-            self._return_handle(h, perform_task)
+            self._return_handle(h, perform_task, self._pool)
 
     async def _streaming_request(self, request: httpx.Request, body: bytes) -> httpx.Response:
         """附件下載路徑：背景執行緒跑 perform()，header 收完就先回 Response，
@@ -369,7 +417,7 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
         pytest-asyncio 下跑，故此處直接假設 asyncio backend 安全可用——若日後
         改用 trio backend 需重寫此方法。
         """
-        h = await self._take_handle()
+        h = await self._take_handle(self._download_pool)
         released = False
         abort = threading.Event()
         perform_task: asyncio.Task[None] | None = None
@@ -377,6 +425,7 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
         collector = _HeaderCollector()
         q: queue.Queue[object] = queue.Queue(maxsize=16)
         headers_done = anyio.Event()
+        ready = asyncio.Event()
         loop = asyncio.get_running_loop()
 
         def on_header(line: bytes) -> None:
@@ -384,11 +433,18 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
             if line in (b"\r\n", b"\n"):  # header 區塊結束
                 _notify_loop(loop, headers_done.set)
 
+        def enqueue(item: object) -> bool:
+            while not abort.is_set():
+                try:
+                    q.put(item, timeout=0.1)
+                except queue.Full:
+                    continue
+                _notify_loop(loop, ready.set)
+                return True
+            return False
+
         def on_write(data: bytes) -> int:
-            if abort.is_set():
-                return 0  # ≠ len(data) → libcurl 以 CURLE_WRITE_ERROR 中止 perform()
-            q.put(data)  # 滿了阻塞生產者執行緒 → 背壓
-            return len(data)
+            return len(data) if enqueue(data) else 0
 
         def run() -> None:
             try:
@@ -401,19 +457,21 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
                 h.setopt(pycurl.HEADERFUNCTION, on_header)
                 h.setopt(pycurl.WRITEFUNCTION, on_write)
                 h.perform()
-                q.put(_SENTINEL)
+                enqueue(_SENTINEL)
             except Exception as exc:
                 # 不只 pycurl.error：_configure 內的型別轉換等錯誤也要能終止
                 # 消費端的 q.get()，否則消費端會永久阻塞（既無 sentinel 也無
                 # 例外物件）。統一推例外物件進佇列，交給 __aiter__ 轉譯。
-                q.put(exc)
+                enqueue(exc)
             finally:
                 # perform 若在 header 前就失敗，主端不能永久卡在 headers_done.wait()。
                 _notify_loop(loop, headers_done.set)
 
         # 在背景執行 perform；不 await 它，讓 body 邊下載邊被消費。task 參照放進
         # self._pending 避免被 GC；done_callback 在背景執行緒結束時自動清除。
-        perform_task = asyncio.ensure_future(anyio.to_thread.run_sync(run))
+        perform_task = asyncio.ensure_future(
+            anyio.to_thread.run_sync(run, limiter=_download_limiter())
+        )
         self._pending.add(perform_task)
         perform_task.add_done_callback(self._pending.discard)
 
@@ -425,24 +483,10 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
                 return
             released = True
             abort.set()
-            # 清空佇列，解除可能正阻塞在 q.put() 的生產者（消費端提早中止時，
-            # 佇列可能已滿、生產者正等著把下一個 chunk put 進去）。
-            while True:
-                try:
-                    q.get_nowait()
-                except queue.Empty:
-                    break
-            # run() 已把所有例外攔在內部轉成佇列項目、正常結束，理論上不會再
-            # 往外拋；仍以 try/except 兜底，避免未來改動讓例外意外逃逸而卡住
-            # release（下面的 self._pool.put_nowait(h) 也就永遠不會執行）。
             try:
-                await perform_task
-            except Exception:
-                pass
-            # 確認背景執行緒真的已經結束、不會再操作這個 handle，才歸還池；
-            # 否則下一個請求可能拿到同一個 handle，與仍在跑的背景執行緒並發
-            # 操作它，是 libcurl 的未定義行為（可能污染連線狀態甚至 crash）。
-            self._pool.put_nowait(h)
+                await asyncio.shield(perform_task)
+            finally:
+                self._return_handle(h, perform_task, self._download_pool)
 
         # 這段必須包在 try 裡：handle 只由 release() 歸還，而 release() 只由 stream
         # 的 aclose() 觸發。若在 Response 交出去之前就被取消（headers_done.wait()
@@ -455,23 +499,17 @@ class PyCurlTransport(httpx.AsyncBaseTransport):
             return httpx.Response(
                 collector.status_code or 200,
                 headers=_filter_response_headers(collector.pairs),
-                stream=_QueueByteStream(q, release),
+                stream=_QueueByteStream(q, ready, release),
                 request=request,
             )
         except BaseException:
-            # 通知生產者中止（on_write 回 0 → libcurl 以 WRITE_ERROR 結束 perform），
-            # 並清空佇列解除可能正阻塞在 q.put() 的生產者，讓執行緒得以盡快結束。
-            released = True  # release() 之後若再被呼叫不重複處理
+            released = True
             abort.set()
-            while True:
-                try:
-                    q.get_nowait()
-                except queue.Empty:
-                    break
-            self._return_handle(h, perform_task)
+            self._return_handle(h, perform_task, self._download_pool)
             raise
 
     async def aclose(self) -> None:
         """關閉池內所有 handle。"""
-        while not self._pool.empty():
-            self._pool.get_nowait().close()
+        for pool in (self._pool, self._download_pool):
+            while not pool.empty():
+                pool.get_nowait().close()

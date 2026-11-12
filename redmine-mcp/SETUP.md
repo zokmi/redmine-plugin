@@ -22,7 +22,7 @@ uvx --python 3.13 --from "<已安裝 plugin 根目錄>/redmine-mcp" redmine-mcp 
 | Windows | `%APPDATA%\redmine-mcp\config.toml` |
 | macOS／Linux | `~/.config/redmine-mcp/config.toml` |
 
-設定 `REDMINE_CONFIG` 可指定其他路徑。金鑰只透過 `X-Redmine-API-Key` header 傳送，寫入時會收緊檔案權限。
+設定 `REDMINE_CONFIG` 可指定其他路徑。金鑰只透過 `X-Redmine-API-Key` header 傳送，設定工具會先建立私有暫存檔再寫入金鑰。Windows 目標磁碟須支援 ACL，若無法建立安全檔案，原設定會保留。
 
 ## 維護站台
 
@@ -37,7 +37,9 @@ uvx --python 3.13 --from "<已安裝 plugin 根目錄>/redmine-mcp" redmine-mcp 
 
 ## 附件與自動暫存
 
-上傳普通檔案時，將使用者提供的本機檔案路徑直接傳給 `upload_attachment.file_path`，不必先複製到特定目錄。對話附件只有在主程式實際提供可讀的本機路徑時才能直接使用；主程式未提供時，需先取得可讀路徑，或使用 `content_base64`。Base64 圖片不必落地。
+`upload_attachment.file_path` 預設只接受套件管理的下載附件。若要上傳其他本機檔案，請在目標站台的 `[sites.<代號>]` 設定 `attachment_upload_root` 為專用上傳目錄的絕對路徑，並將要上傳的檔案放進該目錄。圖片也可直接傳入 `content_base64`。
+
+站台預設要求 HTTPS。仍使用 HTTP 的舊站須在自己的站台設定加入 `allow_insecure_http = true`，HTTP 會以明文傳送 API key 與工單資料。修改設定後請重新啟動服務。
 
 下載的附件與套件建立的暫存依站台網址隔離，存放在下列使用者資料目錄，無需設定：
 

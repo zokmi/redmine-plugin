@@ -16,6 +16,7 @@
 ## 使用方式
 
 - get_issue 預設完整模式保持相容；summary=true 只供初步瀏覽，長內文／留言提供 600 字預覽與截斷標記，編輯前重讀完整模式。
+- 摘要查詢省略 include 中的 journals，需要異動紀錄時才指定 include: ["journals"]。
 - journals_offset 從最新紀錄跳過 N 筆，使用回傳 journals_next_offset 往前讀。需完整查核時讀完相關討論，未讀範圍明列待確認。此分批只減少模型回傳量，Redmine 上游仍回傳完整歷程。
 - collect_issue_changes.py --with-diff 預設整批 1200 行／48000 字元，各檔仍最多 400 行；重複 patch 只輸出一次，截斷或省略需按 commit／檔案補讀。可用 --max-total-diff-lines 與 --max-total-diff-chars 調整。
 - 兩個 collector 預設緊湊 JSON；人工閱讀可加 --pretty。

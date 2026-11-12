@@ -16,12 +16,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from redmine_mcp.config import ConfigError
+from redmine_mcp.config import ConfigError, validate_site_url
 from redmine_mcp.config_file import GLOBAL_KEYS, LEGACY_ATTACHMENT_KEYS, structure_config
 from redmine_mcp.errors import RedmineError
 from redmine_mcp.setup import toml_edit
 from redmine_mcp.setup.external import CommandRunner
-from redmine_mcp.setup.fsops import tighten_permissions, write_config
+from redmine_mcp.setup.fsops import write_config
 from redmine_mcp.setup.wizard import Prompts, Verifier
 
 #: 定位要編輯的區間；每次都吃當下的全文，因為前一次編輯會讓舊索引失效。
@@ -105,14 +105,14 @@ def commit(
     assume_yes: bool,
     allow_no_sites: bool = False,
 ) -> int:
-    """驗證、確認、落地、收緊權限並提醒重新連線。
+    """驗證、確認、安全寫入並提醒重新連線。
 
     參數:
         prompts: 互動管道。
         config_path: 參數檔路徑。
         new_text: 編輯後的全文。
         preview: 要顯示在確認面板裡的摘要行。
-        run: 外部指令執行器（收緊權限時會用到）。
+        run: 既有呼叫端提供的外部指令執行器。
         assume_yes: 為真時跳過確認提問，但不跳過驗證與警告。
         allow_no_sites: 允許結果沒有任何站台（刪除最後一個站台時）。
     回傳:
@@ -142,21 +142,8 @@ def commit(
         prompts.say(f"[red]×[/red] 寫入失敗：{exc}")
         return 1
 
-    # 收緊權限必須緊接在寫檔之後、在任何輸出之前。write_config() 以 os.replace 換掉
-    # inode，新檔權限來自建立時的預設與目錄繼承、不會沿用舊檔，所以這一步漏掉就等於把
-    # 含金鑰的檔案權限放回預設。之所以不先印「已寫入」再收緊：終端輸出本身會失敗（實測
-    # 在字碼頁 950 的終端上，Rich 印 `✓` 會拋 UnicodeEncodeError），而那個例外會讓收緊
-    # 整個被跳過，留下一個權限寬鬆的金鑰檔。
-    problem = tighten_permissions(config_path, lambda argv: run(argv).code)
-
     prompts.say(f"[green]✓[/green] 已寫入 {config_path}")
-    if problem:
-        prompts.say(
-            f"[yellow]![/yellow] 權限收緊失敗（{problem}）。"
-            "這個檔案含金鑰，請自行確認只有你讀得到。"
-        )
-    else:
-        prompts.say("[green]✓[/green] 已收緊檔案權限")
+    prompts.say("[green]✓[/green] 已收緊檔案權限")
 
     prompts.say("改動要重新連線才生效：在 Claude Code 用 /mcp 重連（或重開）。")
     return 0
@@ -436,8 +423,14 @@ def set_site(
         while True:
             prompts.say("正在驗證金鑰…")
             try:
-                login = asyncio.run(verify(url_值, key_值))
-            except RedmineError as exc:
+                allow_http = (
+                    current.get("allow_insecure_http") is True
+                    and url_值.rstrip("/") == current.get("url", "").rstrip("/")
+                )
+                validate_site_url(url_值, allow_insecure_http=allow_http)
+                kwargs = {"allow_insecure_http": True} if allow_http else {}
+                login = asyncio.run(verify(url_值, key_值, **kwargs))
+            except (ConfigError, RedmineError) as exc:
                 prompts.say(f"[red]×[/red] 驗證失敗：{exc}")
                 if not prompts.confirm("要重新輸入嗎？"):
                     prompts.say("已取消，參數檔未被修改。")

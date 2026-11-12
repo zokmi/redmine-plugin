@@ -54,3 +54,21 @@ async def test_錯誤訊息不含金鑰():
     with pytest.raises(RedmineError) as exc:
         await verify_credentials("https://a/redmine", "super-secret-key", transport)
     assert "super-secret-key" not in str(exc.value)
+
+
+
+async def test_http_credential_verification_requires_opt_in():
+    received = []
+
+    def handler(request):
+        received.append(request.headers["X-Redmine-API-Key"])
+        return httpx.Response(200, json={"user": {"login": "tester"}})
+
+    transport = httpx.MockTransport(handler)
+    with pytest.raises(RedmineError, match="HTTPS"):
+        await verify_credentials("http://legacy.test", "test-key", transport)
+    assert not received
+    assert await verify_credentials(
+        "http://legacy.test", "test-key", transport, allow_insecure_http=True,
+    ) == "tester"
+    assert received == ["test-key"]

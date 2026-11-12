@@ -9,11 +9,8 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from collections.abc import Callable
 from pathlib import Path
-
-#: 執行外部指令的介面：收指令與參數，回傳 exit code。測試以假函式注入。
-Runner = Callable[[list[str]], int]
+from uuid import uuid4
 
 
 def write_config(path: Path, content: str) -> None:
@@ -26,12 +23,16 @@ def write_config(path: Path, content: str) -> None:
         OSError: 建立目錄、寫入暫存檔或替換失敗；此時原檔維持不變且不留暫存檔。
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", newline="\n", dir=path.parent, delete=False
-    )
-    tmp = Path(handle.name)
+    if sys.platform == "win32":
+        from redmine_mcp.setup.fsops_windows import open_private_fd
+
+        tmp = path.with_name(f".redmine-{uuid4().hex}.tmp")
+        fd = open_private_fd(tmp)
+    else:
+        fd, name = tempfile.mkstemp(dir=path.parent)
+        tmp = Path(name)
     try:
-        with handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
         os.replace(tmp, path)
     except BaseException:
@@ -41,49 +42,3 @@ def write_config(path: Path, content: str) -> None:
         # 清理後原樣 raise，不會吞掉任何例外，不影響原有的錯誤傳遞行為。
         tmp.unlink(missing_ok=True)
         raise
-
-
-def tighten_permissions(path: Path, run: Runner) -> str | None:
-    """把參數檔權限收到只有本人可讀。
-
-    失敗不拋出：檔案此時已經寫好且可用，為了權限沒設成而讓整個安裝失敗並不划算。
-    回傳原因讓精靈提醒使用者自行處理即可。
-
-    參數:
-        path: 參數檔路徑。
-        run: 執行外部指令的函式（Windows 才會用到）。
-    回傳:
-        成功時為 None；失敗時為可直接顯示給使用者的原因字串。
-    """
-    if sys.platform != "win32":
-        try:
-            path.chmod(0o600)
-        except OSError as exc:
-            return f"chmod 失敗：{exc.strerror or exc}"
-        return None
-
-    user = os.environ.get("USERNAME") or ""
-    if not user:
-        return "找不到 USERNAME 環境變數，無法組出 icacls 指令"
-
-    # 授權對象要帶上網域（電腦名稱），不能只給裸帳號名。實測踩過的坑：在一台電腦名稱
-    # 與帳號名稱相同的機器上（whoami 為 kenny\kenny），`/grant:r kenny:(R)` 會回傳 0，
-    # 但產生的 DACL 是 `KENNY\:(R)`——裸名被解析成了別的主體，結果沒有任何一條 ACE
-    # 符合執行中的使用者，連本人都讀不到這個檔，server 下次啟動就讀不到參數檔。
-    domain = os.environ.get("USERDOMAIN") or ""
-    principal = f"{domain}\\{user}" if domain else user
-
-    code = run(["icacls", str(path), "/inheritance:r", "/grant:r", f"{principal}:(R)"])
-    if code != 0:
-        return f"icacls 以 exit code {code} 結束"
-
-    # icacls 回傳 0 不代表結果正確（上面那個坑就是「成功」地把自己鎖在門外），因此回讀
-    # 驗一次。讀不到比權限沒收緊嚴重得多——後者是風險，前者是這台機器的 server 直接壞掉。
-    try:
-        path.read_bytes()
-    except OSError as exc:
-        return (
-            f"收緊後反而讀不到這個檔（{exc.strerror or exc}）；"
-            f"請執行 icacls \"{path}\" /grant:r \"{principal}:(R)\" 自行確認授權對象是否正確"
-        )
-    return None

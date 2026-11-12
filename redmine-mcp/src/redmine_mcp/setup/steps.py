@@ -453,7 +453,8 @@ class ConfigStep(Step):
         # 成因之一；不驗等於少檢查一個最可能的原因。訊息一律不含金鑰內容。
         for site in settings.sites.values():
             try:
-                asyncio.run(ctx.verify(site.url, site.api_key))
+                kwargs = {"allow_insecure_http": True} if site.allow_insecure_http else {}
+                asyncio.run(ctx.verify(site.url, site.api_key, **kwargs))
             except RedmineError as exc:
                 return StepOutcome(False, f"站台 {site.name} 驗證失敗：{exc}")
         return StepOutcome(True, f"{names}（金鑰皆驗證通過）", skipped=True)

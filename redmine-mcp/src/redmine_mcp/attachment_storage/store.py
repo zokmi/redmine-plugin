@@ -230,13 +230,24 @@ class AttachmentStore:
         return None
 
     @contextmanager
-    def borrow_source(self, path: Path, max_bytes: int) -> Iterator[bytes]:
+    def borrow_source(
+        self, path: Path, max_bytes: int, *, upload_root: Path | None = None,
+    ) -> Iterator[bytes]:
         if max_bytes < 0:
             raise ValueError("讀取上限不得為負數")
         path = Path(os.path.abspath(path))
         record = self._record_for(path)
         if record is None:
+            if (
+                path.is_relative_to(self.root)
+                or upload_root is None
+                or path == upload_root
+                or not path.is_relative_to(upload_root)
+            ):
+                raise ValueError("檔案不在允許的上傳路徑，請使用受管理附件或站台的附件上傳目錄")
             with file_ops.open_regular(path) as stream:
+                if os.fstat(stream.fileno()).st_nlink != 1:
+                    raise ValueError("上傳目錄只接受沒有其他硬連結的一般檔案")
                 yield file_ops.read_limited(stream, max_bytes)
             return
         with file_ops.try_lock(self.lock_path(record)) as acquired:

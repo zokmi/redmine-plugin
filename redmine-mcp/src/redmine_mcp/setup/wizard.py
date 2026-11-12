@@ -11,9 +11,9 @@ import tomllib
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from redmine_mcp.config import _SITE_NAME_PATTERN, ConfigError
+from redmine_mcp.config import _SITE_NAME_PATTERN, ConfigError, validate_site_url
 from redmine_mcp.errors import RedmineError
 from redmine_mcp.setup import toml_edit
 from redmine_mcp.setup.external import (
@@ -24,7 +24,7 @@ from redmine_mcp.setup.external import (
     smoke_test,
     unregister,
 )
-from redmine_mcp.setup.fsops import tighten_permissions, write_config
+from redmine_mcp.setup.fsops import write_config
 from redmine_mcp.setup.site_hints import (
     derive_site_label,
     derive_site_name,
@@ -32,8 +32,12 @@ from redmine_mcp.setup.site_hints import (
     subpath_candidate,
 )
 
+
 #: 驗證函式的介面：收 url 與 api_key，成功回傳登入帳號，失敗拋 RedmineError。
-Verifier = Callable[[str, str], Coroutine[Any, Any, str]]
+class Verifier(Protocol):
+    def __call__(
+        self, url: str, api_key: str, /, *, allow_insecure_http: bool = False,
+    ) -> Coroutine[Any, Any, str]: ...
 
 #: 註冊到 Claude Code 時使用的名稱與執行檔名。
 _SERVER_NAME = "redmine"
@@ -684,6 +688,14 @@ def _ask_credentials(
                 return None
             continue
 
+        try:
+            validate_site_url(url)
+        except ConfigError as exc:
+            prompts.say(f"[red]×[/red] {exc}")
+            if not _retry(prompts, bundle_mode, 剩餘次數):
+                return None
+            continue
+
         if existing is not None:
             重複使用的金鑰 = _reuse_existing_key(prompts, verify, url, existing[1])
             if 重複使用的金鑰 is not None:
@@ -966,19 +978,8 @@ def run_setup(
         prompts.say(f"[red]×[/red] 寫入失敗：{exc}")
         return 1
 
-    # 收緊權限緊接在寫檔之後、在任何輸出之前：終端輸出本身會失敗（字碼頁 950 的終端上
-    # Rich 印 `✓` 會拋 UnicodeEncodeError），先印再收緊會讓那個例外把收緊整個跳過，
-    # 留下一個權限寬鬆的金鑰檔。
-    problem = tighten_permissions(config_path, lambda argv: run(argv).code)
-
     prompts.say(f"[green]✓[/green] 已寫入 {config_path}")
-    if problem:
-        prompts.say(
-            f"[yellow]![/yellow] 權限收緊失敗（{problem}）。"
-            "這個檔案含金鑰，請自行確認只有你讀得到。"
-        )
-    else:
-        prompts.say("[green]✓[/green] 已收緊檔案權限")
+    prompts.say("[green]✓[/green] 已收緊檔案權限")
 
     if not finish:
         return 0

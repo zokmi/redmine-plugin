@@ -230,7 +230,7 @@ def decode_image_payload(content_base64: str, max_bytes: int) -> tuple[bytes, st
     if detected is None:
         raise ValueError(
             "content_base64 只接受 PNG／JPEG／GIF／WebP 圖片；"
-            "其他型別請直接提供可存取的檔案路徑 file_path"
+            "其他型別請提供允許的檔案路徑 file_path"
         )
     mime, ext = detected
     return data, mime, ext
@@ -387,7 +387,7 @@ def register(
             "把圖片或檔案上傳到 Redmine，取得 upload token。"
             "token 要再帶進 create_issue／update_issue／add_issue_note 的 uploads 參數，"
             "才會真正掛到 issue 上。"
-            "可直接用 file_path 提供對話附件或其他可存取的一般檔案路徑，不需設定目錄。"
+            "file_path 僅接受受管理附件或目標站台上傳目錄內的檔案。"
             "上傳不修改原始檔，下載的管理暫存有保存期限；"
             "只有圖片內容而沒有合法路徑時用 content_base64，僅接受 PNG／JPEG／GIF／WebP。"
             "回傳的 filename 是上傳後使用的檔名，帶進 uploads 時用它，寫入工具會據此"
@@ -399,7 +399,7 @@ def register(
             str | None,
             Field(
                 description=(
-                    "可存取的對話附件或本機一般檔案路徑；與 content_base64 二者其一必填。"
+                    "受管理附件或站台允許的上傳目錄內的檔案路徑；與 content_base64 二者其一必填。"
                 )
             ),
         ] = None,
@@ -425,7 +425,7 @@ def register(
         """上傳圖片或檔案並取得 upload token。
 
         參數:
-            file_path: 可存取的對話附件或本機一般檔案路徑；與 content_base64 互斥。
+            file_path: 受管理附件或站台允許的上傳目錄內的檔案路徑；與 content_base64 互斥。
             content_base64: 圖片內容的 base64，只接受 PNG／JPEG／GIF／WebP；與 file_path 互斥。
             site: 要寫入的站台代號；設定多個站台時必填。
             filename: 上傳後顯示的檔名；未提供則使用原檔名。
@@ -445,7 +445,9 @@ def register(
 
                 def read_source() -> bytes:
                     try:
-                        with attachment_store.borrow_source(source, max_bytes) as contents:
+                        with attachment_store.borrow_source(
+                            source, max_bytes, upload_root=client.settings.attachment_upload_root,
+                        ) as contents:
                             if not contents:
                                 raise ValueError("檔案內容為空，拒絕上傳")
                             return contents

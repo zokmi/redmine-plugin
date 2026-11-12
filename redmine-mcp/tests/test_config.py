@@ -223,3 +223,27 @@ def test_legacy_paths_ignored_and_warning_aggregated_without_access(monkeypatch,
         assert name in caplog.text
     assert "secret" not in caplog.text
     assert "自動管理" in caplog.text
+
+
+def test_http_requires_explicit_site_opt_in():
+    raw = RawConfig(globals={}, sites={"legacy": {"url": "http://legacy.test", "api_key": "key"}})
+    with pytest.raises(ConfigError, match="HTTPS"):
+        load_settings(raw, env={})
+    raw.sites["legacy"]["allow_insecure_http"] = "true"
+    assert load_settings(raw, env={}).sites["legacy"].allow_insecure_http
+    raw.sites["other"] = {"url": "http://other.test", "api_key": "key"}
+    with pytest.raises(ConfigError, match="other"):
+        load_settings(raw, env={})
+
+
+
+def test_toml_requires_a_boolean_http_opt_in():
+    from redmine_mcp.config_file import structure_config
+
+    site = {"url": "http://legacy.test", "api_key": "key", "allow_insecure_http": True}
+    raw = structure_config({"sites": {"legacy": site}}, "test")
+    assert load_settings(raw, env={}).sites["legacy"].allow_insecure_http
+    with pytest.raises(ConfigError, match="HTTPS"):
+        load_settings(raw, env={"REDMINE_URL": "http://other.test"})
+    with pytest.raises(ConfigError, match="布林"):
+        structure_config({"sites": {"legacy": {**site, "allow_insecure_http": "true"}}}, "test")

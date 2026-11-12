@@ -84,29 +84,13 @@ def test_寫入成功會收緊權限並提醒重新連線(tmp_path):
     assert code == 0
     全部輸出 = "\n".join(script.said)
     assert "/mcp" in 全部輸出
-    # os.replace 換掉 inode，新檔權限不會沿用舊檔；漏了這步等於把金鑰檔權限放回預設。
-    # 斷言輸出而非斷言指令：Windows 走 icacls（經 run），其他平台走 Path.chmod（不經 run），
-    # 只有這行訊息在兩個平台都代表「權限收緊真的執行過且成功」。
     assert "已收緊檔案權限" in 全部輸出
     script.assert_exhausted()
 
 
-def test_輸出失敗也不會讓權限收緊被跳過(tmp_path, monkeypatch):
-    """實測踩過的坑：終端輸出本身會失敗，而它會把後面的權限收緊整個跳過。
-
-    在字碼頁 950 的終端上，Rich 印 `[green]✓[/green]` 會拋 UnicodeEncodeError。原本的
-    順序是「寫檔 → 印已寫入 → 收緊權限」，於是那個例外會讓含 API key 的參數檔停在
-    os.replace 之後繼承來的寬鬆權限上（實測 ACL 變成 (I)(M,DC)）。這條測試用「一開口就
-    拋例外」的 say 模擬那個終端，斷言收緊在例外之前就已經發生。
-    """
+def test_輸出失敗也已完成安全寫入(tmp_path):
     target = tmp_path / "config.toml"
-    target.write_text(_一個站台, encoding="utf-8")
-    收緊過 = []
-
-    monkeypatch.setattr(
-        "redmine_mcp.setup.config_ops.tighten_permissions",
-        lambda path, run: 收緊過.append(path) and None,
-    )
+    target.write_text("", encoding="utf-8")
 
     def 一開口就爆(text):
         raise UnicodeEncodeError("cp950", "✓", 0, 1, "illegal multibyte sequence")
@@ -127,7 +111,7 @@ def test_輸出失敗也不會讓權限收緊被跳過(tmp_path, monkeypatch):
     with pytest.raises(UnicodeEncodeError):
         config_ops.commit(壞終端, target, _一個站台, ["預覽"], run=_成功執行, assume_yes=True)
 
-    assert 收緊過 == [target]
+    assert target.read_text(encoding="utf-8") == _一個站台
 
 
 def test_寫檔遇到_OSError_時原檔不動(tmp_path, monkeypatch):
@@ -150,26 +134,6 @@ def test_寫檔遇到_OSError_時原檔不動(tmp_path, monkeypatch):
     assert code == 1
     assert target.read_text(encoding="utf-8") == _一個站台
     assert "寫入失敗" in "\n".join(script.said)
-    script.assert_exhausted()
-
-
-def test_收緊權限失敗仍視為成功(tmp_path, monkeypatch):
-    # spec 明列的另一個失效模式：tighten_permissions() 失敗時只印警告，仍視為
-    # commit() 成功（回傳 0）——檔案這時已經寫好且可用，不該因權限沒收緊就整個失敗。
-    target = tmp_path / "config.toml"
-    target.write_text(_一個站台, encoding="utf-8")
-    monkeypatch.setattr(
-        config_ops, "tighten_permissions", lambda path, run: "icacls 以 exit code 1 結束"
-    )
-    script = 腳本化提問(answers=[], confirms=[True], choices=[])
-
-    code = config_ops.commit(
-        script.build(), target, _一個站台, ["預覽"], run=_成功執行, assume_yes=False
-    )
-
-    assert code == 0
-    全部輸出 = "\n".join(script.said)
-    assert "權限收緊失敗" in 全部輸出
     script.assert_exhausted()
 
 

@@ -468,7 +468,11 @@ async def test_operation_callback_failure_preserves_outcome(registry, tmp_path, 
 
     store = AttachmentStore(tmp_path / "managed")
     source = tmp_path / "source.txt"
-    source.write_bytes(b"upload bytes")
+    if operation == "upload":
+        with store.begin_download("https://redmine.example.com", source.name) as pending:
+            with pending.open_writer() as writer:
+                writer.write(b"upload bytes")
+            source = pending.publish()
     callbacks = []
 
     def callback():

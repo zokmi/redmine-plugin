@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 DEFAULT_MAX_ATTACHMENT_MB = 10
@@ -49,6 +50,8 @@ class SiteSettings:
         api_key: 該站台的 API key，僅供組裝認證 header 使用。
         description: 站台說明；供模型把口語對應到站台代號，未設定時為 None。
         max_attachment_bytes: 單一附件下載／上傳大小上限（位元組）。
+        allow_insecure_http: 是否明確允許這個站台使用明文 HTTP。
+        attachment_upload_root: 此站允許上傳外部檔案的專用目錄。
     """
 
     name: str
@@ -56,6 +59,8 @@ class SiteSettings:
     api_key: str
     description: str | None
     max_attachment_bytes: int
+    allow_insecure_http: bool = False
+    attachment_upload_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,19 @@ def _validate_site_name(name: str) -> str:
     return name
 
 
+def validate_site_url(url: str, *, allow_insecure_http: bool = False, where: str = "站台") -> None:
+    try:
+        parsed = urlparse(url)
+        if not parsed.hostname or parsed.scheme not in {"http", "https"}:
+            raise ValueError
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError
+    except ValueError:
+        raise ConfigError(f"{where}的 url 必須是完整網址，且不能包含帳密") from None
+    if parsed.scheme == "http" and not allow_insecure_http:
+        raise ConfigError(f"{where}預設要求 HTTPS；舊站請在該站設定 allow_insecure_http = true")
+
+
 def _build_site(name: str, values: Mapping[str, str], defaults: Mapping[str, str]) -> SiteSettings:
     """組出單一站台的設定，未指定的鍵沿用全域預設值。
 
@@ -120,9 +138,22 @@ def _build_site(name: str, values: Mapping[str, str], defaults: Mapping[str, str
             "請在參數檔中填入 Redmine 站台根位址（可參考 config.example.toml）"
         )
 
-    parsed = urlparse(raw_url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ConfigError(f"{where}的 url 必須是 http:// 或 https:// 開頭的完整網址")
+    insecure_http = values.get("allow_insecure_http", "false")
+    if insecure_http not in {"true", "false"}:
+        raise ConfigError(f"{where}的 allow_insecure_http 必須是布林值")
+    validate_site_url(raw_url, allow_insecure_http=insecure_http == "true", where=where)
+
+    upload_root_value = (values.get("attachment_upload_root") or "").strip()
+    try:
+        upload_root = Path(upload_root_value).expanduser() if upload_root_value else None
+    except RuntimeError:
+        raise ConfigError(f"{where}的 attachment_upload_root 無法展開使用者目錄") from None
+    if upload_root is not None:
+        if not upload_root.is_absolute():
+            raise ConfigError(f"{where}的 attachment_upload_root 必須是絕對路徑")
+        upload_root = Path(os.path.abspath(upload_root))
+        if upload_root == Path(upload_root.anchor):
+            raise ConfigError(f"{where}的 attachment_upload_root 不能是磁碟根目錄")
 
     api_key = (values.get("api_key") or "").strip()
     if not api_key:
@@ -149,6 +180,8 @@ def _build_site(name: str, values: Mapping[str, str], defaults: Mapping[str, str
         api_key=api_key,
         description=description,
         max_attachment_bytes=_max_bytes(pick("max_attachment_mb"), where),
+        allow_insecure_http=insecure_http == "true",
+        attachment_upload_root=upload_root,
     )
 
 
@@ -198,6 +231,8 @@ def load_settings(raw: RawConfig | None = None, env: Mapping[str, str] | None = 
     if len(sites_raw) == 1:
         only = next(iter(sites_raw.values()))
         if env_url:
+            if env_url.rstrip("/") != only.get("url", "").strip().rstrip("/"):
+                only.pop("allow_insecure_http", None)
             only["url"] = env_url
         if env_key_value:
             only["api_key"] = env_key_value

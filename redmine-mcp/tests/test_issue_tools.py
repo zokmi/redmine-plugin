@@ -136,7 +136,8 @@ async def test_get_issue_組出_include_參數(registry):
     assert seen["params"]["include"] == "journals,attachments"
 
 
-async def test_get_issue_未指定_include_時不帶參數(registry):
+@pytest.mark.parametrize("summary", [False, True])
+async def test_get_issue_未指定_include_時不帶參數(registry, summary):
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -145,7 +146,7 @@ async def test_get_issue_未指定_include_時不帶參數(registry):
 
     sites = registry(handler)
     mcp = create_server(sites)
-    await _call(mcp, "get_issue", {"issue_id": 1})
+    await _call(mcp, "get_issue", {"issue_id": 1, "summary": summary})
     await sites.aclose()
 
     assert "include" not in seen["params"]

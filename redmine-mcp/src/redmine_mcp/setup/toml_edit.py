@@ -369,7 +369,7 @@ def render_new_config(block: str) -> str:
 def convert_legacy(text: str) -> str:
     """把舊的扁平格式轉成 [sites.default] 格式。
 
-    搬移 url、api_key 與 description 至站台區塊，其餘全域設定與舊路徑文字保留。
+    搬移站台專用設定至站台區塊，其餘全域設定與舊路徑文字保留。
 
     參數:
         text: 舊格式的參數檔全文。
@@ -384,11 +384,12 @@ def convert_legacy(text: str) -> str:
     remaining: list[str] = []
     moved: list[str] = []
     at_root = True
+    site_keys = {"url", "api_key", "description", "allow_insecure_http", "attachment_upload_root"}
     for statement in _statements(text):
         if statement.header:
             at_root = False
         original = text[statement.start:statement.end]
-        if at_root and {"url", "api_key", "description"} & statement.data.keys():
+        if at_root and site_keys & statement.data.keys():
             moved.append(original)
         else:
             remaining.append(original)

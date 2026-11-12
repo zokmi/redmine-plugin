@@ -99,7 +99,7 @@ def test_borrow_external_reads_without_creating_root_or_changing_source(tmp_path
     source.write_bytes(b"external")
     before = source.stat()
     store = make_store(root)
-    with store.borrow_source(source, 8) as data:
+    with store.borrow_source(source, 8, upload_root=source.parent) as data:
         assert data == b"external"
         assert not root.exists()
     after = source.stat()
@@ -136,7 +136,7 @@ def test_borrow_rejects_locked_managed_source_and_oversized_external(tmp_path: P
     with pytest.raises(ValueError):
         with store.borrow_source(final, 7):
             pass
-    with pytest.raises(OSError):
+    with pytest.raises(ValueError, match="允許的上傳路徑"):
         with store.borrow_source(tmp_path, 7):
             pass
 
@@ -157,8 +157,9 @@ def test_unknown_file_inside_root_is_never_enrolled(tmp_path: Path) -> None:
     root.mkdir()
     source.write_bytes(b"unknown")
     store = make_store(root)
-    with store.borrow_source(source, 7) as data:
-        assert data == b"unknown"
+    with pytest.raises(ValueError, match="允許的上傳路徑"):
+        with store.borrow_source(source, 7, upload_root=source.parent):
+            pass
     assert list(root.iterdir()) == [source]
 
 
@@ -272,8 +273,10 @@ def test_malformed_record_is_not_used_or_rewritten(tmp_path: Path, change: dict[
     before = metadata.read_bytes()
     with pytest.raises(ValueError):
         store.load_record(site_storage_key(URL), final.parent.name)
-    with store.borrow_source(final, 8) as data:
-        assert data == b"complete"
+    with pytest.raises(ValueError, match="允許的上傳路徑"):
+        with store.borrow_source(final, 8):
+            pass
+    assert final.read_bytes() == b"complete"
     assert metadata.read_bytes() == before
 
 
@@ -292,8 +295,9 @@ def test_record_path_field_is_ignored_and_unknown_temp_is_not_enrolled(tmp_path:
     temporary = metadata.with_name(f".{metadata.name}.unknown.tmp")
     temporary.write_bytes(b"unknown")
     before = metadata.read_bytes()
-    with store.borrow_source(temporary, 7) as data:
-        assert data == b"unknown"
+    with pytest.raises(ValueError, match="允許的上傳路徑"):
+        with store.borrow_source(temporary, 7, upload_root=temporary.parent):
+            pass
     assert metadata.read_bytes() == before
     assert temporary.read_bytes() == b"unknown"
 

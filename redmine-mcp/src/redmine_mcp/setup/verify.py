@@ -11,12 +11,13 @@ from typing import Any
 import httpx
 
 from redmine_mcp.client import RedmineClient
-from redmine_mcp.config import SiteSettings
+from redmine_mcp.config import ConfigError, SiteSettings
 from redmine_mcp.errors import RedmineError, RedmineServerError
 
 
 async def verify_credentials(
-    url: str, api_key: str, transport: httpx.AsyncBaseTransport | None = None
+    url: str, api_key: str, transport: httpx.AsyncBaseTransport | None = None,
+    *, allow_insecure_http: bool = False,
 ) -> str:
     """以 /users/current.json 驗證站台網址與金鑰。
 
@@ -36,8 +37,12 @@ async def verify_credentials(
         api_key=api_key,
         description=None,
         max_attachment_bytes=0,
+        allow_insecure_http=allow_insecure_http,
     )
-    client = RedmineClient(settings, transport=transport)
+    try:
+        client = RedmineClient(settings, transport=transport)
+    except ConfigError as exc:
+        raise RedmineError(str(exc)) from exc
     try:
         raw: dict[str, Any] = await client.get("/users/current.json")
     except RedmineError as exc:

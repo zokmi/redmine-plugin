@@ -16,6 +16,7 @@ from redmine_mcp.pycurl_transport import (
     EXT_MAX_FILESIZE,
     CurlError,
     CurlFileSizeExceeded,
+    CurlResponseSizeExceeded,
     CurlTimeoutError,
     PyCurlTransport,
 )
@@ -348,3 +349,105 @@ def test_非_ascii_回應_header_可交給_httpx_不炸():
         content=b"",
     )
     assert response.headers.raw == [(b"Content-Disposition", raw)]
+
+
+async def test_issue_lookup_while_download_is_saturated():
+    import asyncio
+
+    import anyio
+
+    from redmine_mcp.config import RawConfig, load_settings
+    from redmine_mcp.server import create_server
+    from redmine_mcp.sites import SiteRegistry
+    from tests.conftest import call_tool
+
+    blocked = threading.Event()
+    finish = threading.Event()
+
+    class Handler(_Handler):
+        def do_GET(self):
+            if self.path == "/issues/42.json":
+                payload = b'{"issue":{"id":42,"subject":"available"}}'
+            else:
+                payload = b"x" * (1024 * 1024)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            try:
+                if self.path != "/issues/42.json":
+                    self.wfile.write(payload[:-1])
+                    blocked.set()
+                    finish.wait(5)
+                    self.wfile.write(payload[-1:])
+                else:
+                    self.wfile.write(payload)
+            except OSError:
+                pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    settings = load_settings(RawConfig({}, {"test": {
+        "url": url, "api_key": "test", "allow_insecure_http": "true",
+    }}), env={})
+    transport = PyCurlTransport(pool_size=1, total_timeout=5)
+    sites = SiteRegistry(settings, transports={"test": transport})
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    original_tokens = limiter.total_tokens
+    limiter.total_tokens = 1
+    try:
+        async with httpx.AsyncClient(transport=transport) as client:
+            async with client.stream("GET", f"{url}/download",
+                                     extensions={EXT_MAX_FILESIZE: 2 * 1024 * 1024}) as response:
+                try:
+                    async with asyncio.timeout(2):
+                        while not blocked.is_set():
+                            await asyncio.sleep(0.01)
+                        result = await call_tool(create_server(sites), "get_issue", {
+                            "site": "test", "issue_id": 42,
+                        })
+                    assert result["issue_id"] == 42
+                    assert result["found_in"] == ["test"]
+                finally:
+                    finish.set()
+                assert len(await response.aread()) == 1024 * 1024
+    finally:
+        finish.set()
+        limiter.total_tokens = original_tokens
+        await sites.aclose()
+        srv.shutdown()
+        srv.server_close()
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+async def test_buffered_response_limit_counts_decoded_bytes(compressed):
+    import gzip
+
+    class Handler(_Handler):
+        def do_GET(self):
+            payload = b"x" * (129 if self.path == "/over" else 128)
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            if compressed:
+                payload = gzip.compress(payload)
+                self.send_header("Content-Encoding", "gzip")
+            self.end_headers()
+            try:
+                self.wfile.write(f"{len(payload):x}\r\n".encode() + payload + b"\r\n0\r\n\r\n")
+            except OSError:
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        transport = PyCurlTransport(pool_size=1, max_response_bytes=128)
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(CurlResponseSizeExceeded, match="128"):
+                await client.get(f"{url}/over")
+            response = await client.get(f"{url}/exact")
+            assert response.content == b"x" * 128
+    finally:
+        server.shutdown()
+        server.server_close()

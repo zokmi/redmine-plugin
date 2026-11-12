@@ -472,24 +472,24 @@ def test_legacy同意轉換後完成安裝(tmp_path):
     script.assert_exhausted()
 
 
-def test_權限收緊失敗會提示使用者(tmp_path):
-    """I-3：tighten_permissions() 失敗時要印出警告，不能默默吞掉。"""
+def test_建立安全暫存檔失敗時不發布設定(tmp_path, monkeypatch):
     target = tmp_path / "config.toml"
 
-    def run(argv, stdin=None):
-        if argv and argv[0] == "icacls":
-            return CommandResult(1, "", "拒絕存取")
-        return CommandResult(1, "", "")
+    def refuse_write(path, content):
+        raise OSError("無法建立私有設定檔")
+
+    monkeypatch.setattr("redmine_mcp.setup.wizard.write_config", refuse_write)
 
     script = 腳本化提問(
         answers=["https://a/x", "secret1234", "main", ""],
         confirms=[True],  # 位置確認已移除，只剩「確認寫入嗎？」
         choices=[],
     )
-    code = run_setup(script.build(), config_path=target, run=run, verify=_成功驗證)
-    assert code == 0
-    全部輸出 = "\n".join(script.said)
-    assert "權限收緊失敗" in 全部輸出
+    code = run_setup(script.build(), config_path=target, run=lambda argv: CommandResult(0, '', ''),
+                     verify=_成功驗證)
+    assert code == 1
+    assert "無法建立私有設定檔" in "\n".join(script.said)
+    assert not target.exists()
     script.assert_exhausted()
 
 

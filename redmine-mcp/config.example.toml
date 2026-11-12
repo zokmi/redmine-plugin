@@ -14,8 +14,8 @@
 
 # ── 全域層級（選填）：各站台未指定時的預設值
 #
-# 附件暫存由系統自動管理，無需設定下載或上傳目錄。
-# 普通檔案可直接用 file_path 上傳；原始檔與舊自訂目錄不會遷移或清理。
+# 下載附件由系統自動管理；其他本機檔案須放在站台指定的附件上傳目錄。
+# 原始檔與舊自訂目錄不會遷移或清理。
 # 暫存閒置滿 7 天壓縮，壓縮完成後保留 30 天再刪除；詳見 SETUP.md。
 # 舊 download_dir / upload_dir 與對應環境變數已忽略，不再具有停用附件功能的語意。
 #
@@ -30,6 +30,10 @@ max_attachment_mb = 10
 url     = "https://redmine.example.com/redmine"
 api_key = "<your-api-key>"
 description = "公司正式站"
+# 其他本機檔案可放入這個站台專用的上傳目錄（絕對路徑）。
+# attachment_upload_root = 'C:\RedmineUploads\main'
+# 舊站仍需使用 HTTP 時，在該站明確啟用（API key 將以明文傳送）。
+# allow_insecure_http = true
 
 # 需要第二個站台時複製下面這段，改掉代號與內容即可
 # [sites.client-b]

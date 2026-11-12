@@ -530,7 +530,7 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
             Field(
                 description=(
                     "額外帶出的關聯資料，可用 journals、attachments、relations、"
-                    "children、watchers。"
+                    "children、watchers。需要查閱異動紀錄時才加入 journals。"
                 )
             ),
         ] = None,
@@ -539,6 +539,7 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
             Field(
                 description=(
                     f"最多帶出幾筆註解／異動紀錄（取最近的），預設 {JOURNAL_LIMIT}。"
+                    "僅在 include 包含 journals 時使用，並限制工具輸出筆數。"
                     "回應出現 journals_truncated 時代表還有更早的紀錄，"
                     "確有需要再調高，數值過大會佔用大量對話空間。"
                 ),

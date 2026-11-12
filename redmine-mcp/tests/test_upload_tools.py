@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 from unittest.mock import patch
 
 import httpx
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 from redmine_mcp.config import Settings, SiteSettings
 from redmine_mcp.server import create_server
@@ -29,6 +31,11 @@ PNG_BYTES = bytes.fromhex(
 JPEG_BYTES = bytes.fromhex("ffd8ffe000104a464946")
 GIF_BYTES = b"GIF89a" + b"\x01\x00\x01\x00"
 WEBP_BYTES = b"RIFF" + b"\x1a\x00\x00\x00" + b"WEBP" + b"VP8 "
+
+
+@pytest.fixture
+def settings(settings, tmp_path):
+    return replace(settings, attachment_upload_root=tmp_path)
 
 
 async def test_upload_attachment_送出原始位元組並回傳token(settings, registry, tmp_path):
@@ -59,8 +66,10 @@ async def test_upload_attachment_送出原始位元組並回傳token(settings, r
     assert result["bytes"] == len(PNG_BYTES)
 
 
-async def test_upload_attachment_直接上傳外部檔案(registry, tmp_path_factory, attachment_root):
-    source = tmp_path_factory.mktemp("conversation") / "report.txt"
+async def test_upload_attachment_從核准目錄上傳(registry, tmp_path, attachment_root):
+    conversation = tmp_path / "conversation"
+    conversation.mkdir()
+    source = conversation / "report.txt"
     source.write_bytes(b"conversation attachment")
     seen = []
 
@@ -127,28 +136,6 @@ async def test_upload_attachment_空檔案被拒絕(settings, registry, tmp_path
     await sites.aclose()
 
     assert "空" in str(exc.value)
-
-
-async def test_未設定目錄時可上傳檔案(tmp_path):
-    source = tmp_path / "conversation.txt"
-    source.write_bytes(b"direct upload")
-    site_settings = SiteSettings(
-        name="default", url=BASE_URL, api_key="k", description=None,
-        max_attachment_bytes=1024,
-    )
-    seen = []
-
-    def handler(request):
-        seen.append(request.content)
-        return json_response(201, {"upload": {"token": "direct-token"}})
-
-    sites = SiteRegistry(Settings(sites={"default": site_settings}),
-                         transports={"default": httpx.MockTransport(handler)})
-    result = await _call(create_server(sites), "upload_attachment", {"file_path": str(source)})
-    await sites.aclose()
-    assert result["token"] == "direct-token"
-    assert seen == [b"direct upload"]
-    assert source.read_bytes() == b"direct upload"
 
 
 async def test_Redmine未回傳token時視為失敗(settings, registry, tmp_path):
@@ -724,9 +711,9 @@ async def test_managed_source_reads_in_worker_and_releases_before_callback(regis
 
     class ObservedStore(AttachmentStore):
         @contextmanager
-        def borrow_source(self, path, max_bytes):
+        def borrow_source(self, path, max_bytes, **kwargs):
             observed.append(threading.get_ident())
-            with super().borrow_source(path, max_bytes) as data:
+            with super().borrow_source(path, max_bytes, **kwargs) as data:
                 yield data
 
     store = ObservedStore(tmp_path / "managed")
@@ -780,3 +767,23 @@ async def test_busy_managed_source_reports_retry_without_upload(registry, tmp_pa
     await sites.aclose()
     assert "使用中" in str(exc.value)
     assert sent == []
+
+
+@pytest.mark.parametrize("configured", [False, True])
+async def test_upload_rejects_unapproved_path(settings, tmp_path, configured):
+    source = tmp_path / "private.toml"
+    source.write_text("secret", encoding="utf-8")
+
+    def unexpected(request):
+        pytest.fail("未授權檔案不得送到 Redmine")
+
+    approved = tmp_path / "approved"
+    approved.mkdir()
+    site = replace(settings, attachment_upload_root=approved if configured else None)
+    sites = SiteRegistry(Settings(sites={site.name: site}),
+                         transports={site.name: httpx.MockTransport(unexpected)})
+    try:
+        with pytest.raises(ToolError, match="允許的上傳路徑"):
+            await _call(create_server(sites), "upload_attachment", {"file_path": str(source)})
+    finally:
+        await sites.aclose()

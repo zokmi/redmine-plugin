@@ -9,7 +9,7 @@ from typing import Any, BinaryIO
 import httpx
 
 from redmine_mcp import DIST_NAME, __version__
-from redmine_mcp.config import SiteSettings
+from redmine_mcp.config import SiteSettings, validate_site_url
 from redmine_mcp.errors import (
     RedmineAuthError,
     RedmineConnectionError,
@@ -22,6 +22,7 @@ from redmine_mcp.pycurl_transport import (
     EXT_MAX_FILESIZE,
     EXT_TOTAL_TIMEOUT,
     CurlFileSizeExceeded,
+    CurlResponseSizeExceeded,
     PyCurlTransport,
 )
 
@@ -125,6 +126,11 @@ class RedmineClient:
             transport: 測試用的替代傳輸層；正式執行時留空，會改用 `PyCurlTransport`
                 （以 libcurl 送出，繞過 WAF 的 TLS 指紋偵測，詳見 pycurl_transport.py 模組說明）。
         """
+        validate_site_url(
+            settings.url,
+            allow_insecure_http=settings.allow_insecure_http,
+            where=f"站台 {settings.name}",
+        )
         self.settings = settings
         self._http = httpx.AsyncClient(
             base_url=settings.url,
@@ -288,6 +294,8 @@ class RedmineClient:
         """送出請求並套用統一的錯誤轉譯。"""
         try:
             response = await self._http.request(method, path, **kwargs)
+        except CurlResponseSizeExceeded as exc:
+            raise RedmineServerError(str(exc)) from exc
         except httpx.TransportError as exc:
             raise _wrap_transport_error(exc) from exc
         self._raise_for_status(response)

@@ -93,7 +93,8 @@ GLOBAL_KEYS = frozenset({"max_attachment_mb"})
 
 #: 站台層級允許的鍵。
 SITE_KEYS = frozenset(
-    {"url", "api_key", "description", "max_attachment_mb"}
+    {"url", "api_key", "description", "max_attachment_mb", "allow_insecure_http",
+     "attachment_upload_root"}
 )
 
 #: 舊格式（扁平）參數檔中代表站台設定的鍵；出現任何一個即視為舊格式。
@@ -129,7 +130,12 @@ def _collect(raw: dict, allowed: frozenset[str], where: str) -> dict[str, str]:
         if key not in allowed:
             logger.warning("%s中有無法識別的設定鍵 %r，已忽略（請確認是否拼錯）", where, key)
             continue
-        result[key] = _scalar(key, value, where)
+        if key == "allow_insecure_http":
+            if not isinstance(value, bool):
+                raise ConfigError(f"{where}的 {key} 必須是 TOML 布林值")
+            result[key] = "true" if value else "false"
+        else:
+            result[key] = _scalar(key, value, where)
     return result
 
 
