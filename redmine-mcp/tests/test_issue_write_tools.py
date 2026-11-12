@@ -1037,6 +1037,7 @@ async def test_建單回傳提示後段落點(registry):
     # 提示必須以條件句起頭、並明講沒有事實就不要追加，否則每次建完單
     # 都會多出一則湊數的空註記——那比不寫更擾人。
     assert hint.startswith("若")
+    assert "使用者已授權發布診斷或評估" in hint
     assert "不要追加" in hint
 
 
@@ -1054,6 +1055,8 @@ async def test_寫入工具說明交代新需求的概述是活文件(registry):
         "update_issue 的 description 說明仍要 feature 的修正走註記"
     )
     notes欄位 = tools["add_issue_note"].input_schema["properties"]["notes"]
+    assert "只列實際驗證結果與未驗證項目" in notes欄位["description"]
+    assert "預期結果與驗收標準以工單概述為準" in notes欄位["description"]
     assert "沒有註記落點" in notes欄位["description"], (
         "add_issue_note 未交代 feature 的內容不走註記"
     )

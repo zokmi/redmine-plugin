@@ -141,14 +141,14 @@ def _validate_date(value: str | None, field: str) -> None:
 
 
 #: 建單成功後回給模型的下一步提示。放在回傳值而非工具描述，是因為工具描述在長對話
-#: 裡會先被壓縮掉，回傳值則必定出現在模型的下一個 turn。措辭以「若你手上已有」開頭，
-#: 讓「沒有事實就略過」是預設答案，避免每次建完單都硬湊一則空註記。
+#: 裡會先被壓縮掉，回傳值則必定出現在模型的下一個 turn。
+#: 後續診斷或評估須有發布授權及可查證事實。
 CREATE_NEXT_STEP = (
-    "若你手上已有影響範圍、既有資料要怎麼處理、相依單號等可查證的事實，"
+    "若使用者已授權發布診斷或評估，且有可查證的事實，"
     "依後段模板（bug 用 stage=diagnose，change 用 stage=assess）撰寫，"
     "內容填進 add_issue_note 的 notes，不要覆寫概述。"
     "沒有查得到的事實就不要追加註記。"
-    "唯一的例外是驗收標準與待確認：查出來的判準與要拍板的事一律以 update_issue "
+    "驗收標準與待確認在取得更新授權後以 update_issue "
     "補進概述對應的章節，不寫進註記。"
     "kind=feature 沒有註記落點：概述是活文件，查到的事實與後續的需求修正一律以 "
     "update_issue 回頭改寫概述，資料表與關聯（stage=assess）寫進 DB 子單的概述。"
@@ -594,12 +594,11 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
             "要建立或撰寫單子時，必須先取得該單別的公司標準格式"
             "（redmine-issue-writing skill，或 ~/.redmine-issue-guides/SKILL.md；"
             "kind／stage 的選法見該處），再依格式撰寫內容。"
-            "影響範圍這類查得出來才寫得出來的事實屬後段內容，建單後以 add_issue_note "
-            "追加；驗收標準與待確認則相反，一律留在 description。"
+            "建單授權只涵蓋建單。另有發布診斷或評估的授權時才用 add_issue_note；"
+            "驗收標準與待確認留在 description。"
             "回傳的 verified 是建立後的實際狀態比對；出現 warning 代表有欄位未被套用，"
             "不可回報為已完成。"
-            "回傳的 next_step 提醒後段內容的落點，手上有可查證的事實時照它做，"
-            "沒有就略過。"
+            "回傳的 next_step 提醒已授權的後續內容應放在哪裡。"
         ),
     )
     async def create_issue(
@@ -625,7 +624,7 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
                     "並把骨架整份填在這個欄位，不要拆散到自訂欄位。"
                     "本欄位是給非 IT 人員看的；有 stage 後段的內容都不寫這裡——"
                     "臭蟲單的診斷（stage=diagnose）與調整單的評估（stage=assess）"
-                    "一律改用 add_issue_note；新需求單沒有註記落點，見指示詞。"
+                    "經授權發布時使用 add_issue_note；新需求單沒有註記落點，見指示詞。"
                 )
             ),
         ],
@@ -754,7 +753,7 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
                     "改寫內文時請依該單別的概述骨架"
                     "（bug 用 stage=report；change／feature 省略 stage）"
                     "整份填入這個欄位。bug 的 stage=diagnose 診斷內容、"
-                    "change 的 stage=assess 評估內容不改寫進這裡，改用 add_issue_note；"
+                    "change 的 stage=assess 評估內容經授權發布時使用 add_issue_note；"
                     "feature 相反，需求後續的修正與查到的事實一律回頭改寫這個欄位"
                     "（資料表與關聯改寫 DB 子單的這個欄位）。"
                 )
@@ -871,10 +870,10 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
             str,
             Field(
                 description=(
-                    "註解內容，不可空白。有 stage 後段的內容都寫在這裡——"
-                    "臭蟲單的診斷（kind=bug、stage=diagnose）、"
-                    "調整單的評估（kind=change、stage=assess）；"
-                    "一律不要寫進概述（description）。"
+                    "註解內容，不可空白。依工單實作、除錯或測試時，"
+                    "只有使用者授權回覆才追加註記，內容只列實際驗證結果與未驗證項目。"
+                    "預期結果與驗收標準以工單概述為準。問題摘要、根因與實作細節留在開發報告。"
+                    "使用者另有授權發布診斷（stage=diagnose）或評估（stage=assess）時，依對應格式撰寫。"
                     "新需求單（kind=feature）沒有註記落點：資料表與關聯寫進 DB 子單的概述，"
                     "其餘評估內容與後續的需求修正改用 update_issue 改寫概述。"
                 )
