@@ -57,13 +57,15 @@ uvx --python 3.13 --from "<已安裝 plugin 根目錄>/redmine-mcp" redmine-mcp 
 
 ## Plugin 啟動疑難排解
 
-確認執行服務的終端機能使用 `uvx`，並且服務與兩個客戶端都取得同一份 `REDMINE_MCP_LOCAL_TOKEN`。服務固定監聽本機 loopback，兩個 plugin 的預設連接埠為 `18765`。
+Windows 請從 PowerShell 執行已安裝 plugin 內的 `scripts/install-local-service.ps1`。它會建立目前使用者的 `Redmine MCP (<SID>)` 排程工作。可在工作排程器檢查執行狀態與上次執行結果。首次安裝及每次更新 plugin 後都執行一次。
+
+服務與兩個客戶端需取得同一份 `REDMINE_MCP_LOCAL_TOKEN`。服務固定監聽本機 loopback，兩個 plugin 的預設連接埠為 `18765`。前景診斷命令如下：
 
 ```powershell
 uvx --python 3.13 --from "<已安裝 plugin 根目錄>/redmine-mcp" redmine-mcp serve
 ```
 
-若顯示設定錯誤，確認參數檔存在、TOML 語法正確，且每個站台都有 `url` 與 `api_key`。修改站台設定後重啟共用服務，使所有工作階段讀到新設定。若遇到 401，確認服務和客戶端都繼承了相同權杖。若連接埠已被占用，確認既有監聽者是否為共用服務。
+若顯示設定錯誤，確認參數檔存在、TOML 語法正確，且每個站台都有 `url` 與 `api_key`。新站台設定在共用服務下次啟動時載入。若遇到 401，確認服務和客戶端都繼承了相同權杖。若連接埠已被占用，查詢既有監聽者及排程狀態。排錯時禁止關閉、停止、重啟或終止 MCP 程序、共用服務及其排程工作。
 
 ## 更新與移除
 

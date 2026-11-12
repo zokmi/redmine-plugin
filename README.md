@@ -46,27 +46,31 @@ codex plugin add redmine@redmine-plugins
 
 Codex 與 Claude 的 Redmine plugin 都連到 `http://127.0.0.1:18765/mcp`。服務啟動一次後，可同時開啟兩個工具的多個工作階段。升級時先將兩邊的 plugin 更新到支援共用服務的版本，並結束舊工作階段，讓原有 stdio 程序退出。
 
-Windows PowerShell 首次執行下列命令，建立目前使用者專用的本機連線權杖。權杖與 Redmine API 金鑰分開，應只留在使用者環境中。
+### Windows
+
+首次安裝及每次更新 plugin 後，在 PowerShell 執行：
 
 ```powershell
-$redmineLocalToken = [Environment]::GetEnvironmentVariable('REDMINE_MCP_LOCAL_TOKEN', 'User')
-if (-not $redmineLocalToken) {
-    $redmineTokenBytes = New-Object byte[] 32
-    $redmineTokenGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $redmineTokenGenerator.GetBytes($redmineTokenBytes) }
-    finally { $redmineTokenGenerator.Dispose() }
-    $redmineLocalToken = ([BitConverter]::ToString($redmineTokenBytes)).Replace('-', '')
-    [Environment]::SetEnvironmentVariable('REDMINE_MCP_LOCAL_TOKEN', $redmineLocalToken, 'User')
-}
-$env:REDMINE_MCP_LOCAL_TOKEN = $redmineLocalToken
+& '<已安裝 plugin 根目錄>/scripts/install-local-service.ps1'
+```
+
+腳本需要 `uv`，會把服務與依賴安裝到目前使用者的 `%LOCALAPPDATA%\redmine-mcp\service`，再註冊該使用者的 `Redmine MCP (<SID>)` 排程工作。工作在登入時啟動，執行期間忽略重複觸發，程序退出後由每分鐘的觸發補啟。關閉 Claude、Codex 或 PowerShell 視窗後，工作會繼續執行。
+
+更新先準備新版本，準備成功才更新排程工作。已在執行的服務可繼續使用原有檔案，下次啟動載入新版。若前景 `serve` 已在監聽，排程會在該程序退出後接手 18765。
+
+腳本沿用使用者的 `REDMINE_MCP_LOCAL_TOKEN`，首次安裝才在缺少權杖時建立。首次建立後請完整重開兩個客戶端，必要時重新登入 Windows，讓客戶端取得權杖。權杖與 Redmine API 金鑰分開。
+
+### macOS／Linux
+
+將 `REDMINE_MCP_LOCAL_TOKEN` 設定到服務及客戶端的環境，再以前景命令啟動。若需要登出終端機後持續運作，請交由系統的使用者服務管理器執行同一命令。
+
+```sh
 uvx --python 3.13 --from '<已安裝 plugin 根目錄>/redmine-mcp' redmine-mcp serve
 ```
 
-macOS／Linux 可執行 `export REDMINE_MCP_LOCAL_TOKEN="$(openssl rand -hex 32)"`，再以同一份權杖啟動服務及兩個客戶端。Windows 設定權杖後，從已載入新環境的程序完整重開 Codex 與 Claude。若仍讀到舊環境，重新登入 Windows。服務所在的終端機需保持開啟，以 Ctrl+C 停止。
-
-啟動後在 Claude 的 `/mcp`、Codex 的 MCP 清單確認連線，再呼叫 `get_current_user` 驗證站台。第二次執行 `serve` 會回報連接埠已被占用。詳細欄位與排錯見 [SETUP.md](redmine-mcp/SETUP.md)。
-
 ## 更新與移除
+
+安裝、更新及排錯時，禁止關閉、停止、重啟或終止 `mcp.exe`、`redmine-mcp.exe`、Redmine MCP 共用服務及其排程工作。遇到檔案鎖定、連線失敗或連接埠占用，先查詢程序、排程與連線狀態，再回報仍存在的阻礙。
 
 新版本發布後，透過 plugin 管理器更新 marketplace 與 plugin，重開工具載入新版本。發布前同步更新 `plugin.json`、`.claude-plugin/plugin.json`、`.codex-plugin/plugin.json` 與 `redmine-mcp/pyproject.toml` 的版本，避免舊版本快取。
 
