@@ -122,4 +122,6 @@ Plugin 格式參考：[OpenAI plugin 文件](https://developers.openai.com/plugi
 
 ## 授權
 
-本套件採用 [MIT License](LICENSE)。
+本套件採用 [Apache License 2.0](LICENSE)。
+
+Copyright (c) 2026 Kenny Zheng

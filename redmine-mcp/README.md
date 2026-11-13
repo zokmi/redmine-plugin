@@ -53,4 +53,6 @@ MCP 啟動路徑會保持 stdout 只傳 MCP 訊息，診斷資訊寫到 stderr�
 
 ## 授權
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)
+
+Copyright (c) 2026 Kenny Zheng

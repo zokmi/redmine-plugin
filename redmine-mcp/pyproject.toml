@@ -4,7 +4,7 @@ version = "0.17.3"
 description = "MCP server for Redmine REST API"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Kenny Zheng", email = "kenny.zheng@shinda.com.tw" }]
 keywords = ["mcp", "redmine", "claude", "issue-tracker"]

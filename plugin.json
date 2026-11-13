@@ -6,5 +6,5 @@
     "name": "zokmi"
   },
   "repository": "https://github.com/zokmi/redmine-plugin",
-  "license": "MIT"
+  "license": "Apache-2.0"
 }
