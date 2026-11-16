@@ -84,8 +84,47 @@ test('configured upload root enforces containment and private ACL', { skip: proc
     await writeFile(join(base,'upload','ok.txt'), 'okay'); await writeFile(join(base,'outside.txt'), 'no');
     const store = createWindowsAttachmentStore({root:join(base,'cache')});
     assert.equal(Buffer.from(await store.borrowSource(join(base,'upload','ok.txt'), 4, join(base,'upload'))).toString(), 'okay');
+    await assert.rejects(store.borrowSource(join(base,'outside.txt'), 4, null));
     await assert.rejects(store.borrowSource(join(base,'outside.txt'), 4, join(base,'upload')));
     await assert.rejects(store.borrowSource(join(base,'outside.txt'), 4, base));
     await assert.rejects(store.borrowSource(join(base,'upload','ok.txt'), 3, join(base,'upload')));
   } finally { await rm(base, {recursive:true, force:true}); }
+});
+
+
+test('borrow returns data and preserves record when metadata replacement is blocked', { skip: process.platform !== 'win32' }, async () => {
+  const { createWindowsAttachmentStore } = await import('../dist/storage/windows-store.js');
+  const { openFile } = await import('../dist/storage/windows-handles.js');
+  const base = await mkdtemp(join(tmpdir(), 'rm-refresh-'));
+  const parent = openDirectory(base); const root = createPrivateDirectory(parent, 'cache'); closeHandle(root); closeHandle(parent);
+  try {
+    const store = createWindowsAttachmentStore({root:join(base,'cache')});
+    const stage = await store.stageDownload('https://example.com', 'x'); stage.writer.end('data'); await once(stage.writer, 'finish');
+    const published = await store.publish(stage);
+    const item = basename(dirname(published)), records = join(dirname(dirname(dirname(published))), 'records');
+    const recordPath = join(records, `${item}.json`), before = await readFile(recordPath);
+    const directory = openDirectory(records), blocking = openFile(directory, `${item}.json`, 'open', 'read');
+    try { assert.equal(Buffer.from(await store.borrowSource(published, 100, null)).toString(), 'data'); }
+    finally { closeHandle(blocking); closeHandle(directory); }
+    assert.deepEqual(await readFile(recordPath), before);
+  } finally { await rm(base, {recursive:true, force:true}); }
+});
+
+test('staged file is removed if its handle fails ACL verification', { skip: process.platform !== 'win32' }, async () => {
+  const {spawnSync} = await import('node:child_process');
+  const result = spawnSync(process.execPath, ['--experimental-test-module-mocks', 'test-support/stage-acl-fixture.mjs'], {encoding:'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+});
+
+
+test('record refresh ACL failure is propagated and old data remains', { skip: process.platform !== 'win32' }, async () => {
+  const {spawnSync} = await import('node:child_process');
+  const result = spawnSync(process.execPath, ['--experimental-test-module-mocks', 'test-support/record-acl-fixture.mjs'], {encoding:'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('record refresh disk-full error preserves record and returns data', { skip: process.platform !== 'win32' }, async () => {
+  const {spawnSync} = await import('node:child_process');
+  const result = spawnSync(process.execPath, ['--experimental-test-module-mocks', 'test-support/record-acl-fixture.mjs', 'io'], {encoding:'utf8'});
+  assert.equal(result.status, 0, result.stderr);
 });

@@ -12,14 +12,19 @@ function filename(name: string): void {
   if (!name || name === '.' || name === '..' || name.toLowerCase() === '.download.part' || /[<>:"/\\|?*\x00-\x1f]/.test(name) || /[. ]$/.test(name) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) throw new Error('Invalid attachment filename');
 }
 function timestamp(clock: () => Date): string { return clock().toISOString().replace('Z', '+00:00'); }
-function closeAll(handles: H[]): void { for (const h of handles.reverse()) { try { closeHandle(h); } catch {} } handles.length = 0; }
+function closeAll(handles: H[]): void { const errors: unknown[] = []; for (const h of handles.reverse()) { try { closeHandle(h); } catch (error) { errors.push(error); } } handles.length = 0; if (errors.length) throw new AggregateError(errors, 'Cannot close attachment handles'); }
 function child(parent: H, name: string, create: boolean, handles: H[]): H {
   let h: H;
   try { h = openChildDirectory(parent, name); } catch (error) { if (!create) throw error; h = createDirectory(parent, name); }
   handles.push(h); verifyPrivateHandle(h); return h;
 }
 function file(parent: H, name: string, mode: 'open' | 'create', access: 'read' | 'modify', handles: H[]): H {
-  const h = openFile(parent, name, mode, access); handles.push(h); verifyPrivateHandle(h); return h;
+  const h = openFile(parent, name, mode, access); handles.push(h);
+  try { verifyPrivateHandle(h); } catch (error) {
+    if (mode === 'create') { try { deleteHandle(h); } catch (cleanup) { throw new AggregateError([error, cleanup], 'Cannot clean up unverified staged file'); } }
+    throw error;
+  }
+  return h;
 }
 function bounded(h: H, max: number): Buffer {
   if (!Number.isSafeInteger(max) || max < 0) throw new Error('Invalid size limit');
@@ -74,11 +79,21 @@ export function createWindowsAttachmentStore(options: {root: string; clock?: () 
           if (rec.site_key !== parts[0] || rec.item_id !== parts[2] || rec.filename !== parts[3] || !['active','archive_published'].includes(rec.state)) throw new Error('Invalid managed record');
           const active = child(site, 'active', false, handles), item = child(active, parts[2], false, handles), fh = file(item, parts[3], 'open', 'read', handles), data = bounded(fh, max);
           closeHandle(rh); handles.splice(handles.indexOf(rh), 1);
-          jsonWrite(records, `${parts[2]}.json`, {...rec,last_used_at:timestamp(clock)}, true); return data;
+          try { jsonWrite(records, `${parts[2]}.json`, {...rec,last_used_at:timestamp(clock)}, true); }
+          catch (error) {
+            // Only known storage exhaustion or a confirmed sharing conflict is recoverable.
+            if (error instanceof Error && /^Cannot (?:write|flush) file \((?:39|112)\)$/.test(error.message)) return data;
+            if (!(error instanceof Error) || !/^Cannot rename file \(NTSTATUS /.test(error.message)) throw error;
+            verifyPrivateHandle(records);
+            try { const probe = openFile(records, `${parts[2]}.json`, 'open', 'modify'); try { verifyPrivateHandle(probe); } finally { closeHandle(probe); } }
+            catch (probeError) { if (probeError instanceof Error && probeError.message === 'Cannot open entry (NTSTATUS -1073741757)') return data; throw probeError; }
+            throw error;
+          }
+          return data;
         }
         if (target.toLowerCase() === rootPath.toLowerCase()) throw new Error('Invalid source');
-        if (uploadRoot !== null) { const boundary = path.win32.resolve(uploadRoot), relative = path.win32.relative(boundary, target); if (!relative || relative === '..' || relative.startsWith('..\\') || path.win32.isAbsolute(relative)) throw new Error('Source outside upload root'); const b = openDirectory(boundary); handles.push(b); verifyPrivateHandle(b, true); const components = relative.split(path.win32.sep); const leaf = components.pop()!; let current = b; for (const component of components) current = child(current, component, false, handles); const h = file(current, leaf, 'open', 'read', handles); return bounded(h, max); }
-        const dir = openDirectory(path.win32.dirname(target)); handles.push(dir); const h = openFile(dir, path.win32.basename(target), 'open', 'read'); handles.push(h); return bounded(h, max);
+        if (uploadRoot === null) throw new Error('Upload root required for unmanaged source');
+        { const boundary = path.win32.resolve(uploadRoot), relative = path.win32.relative(boundary, target); if (!relative || relative === '..' || relative.startsWith('..\\') || path.win32.isAbsolute(relative)) throw new Error('Source outside upload root'); const b = openDirectory(boundary); handles.push(b); verifyPrivateHandle(b, true); const components = relative.split(path.win32.sep); const leaf = components.pop()!; let current = b; for (const component of components) current = child(current, component, false, handles); const h = file(current, leaf, 'open', 'read', handles); return bounded(h, max); }
       } finally { closeAll(handles); }
     },
   };
