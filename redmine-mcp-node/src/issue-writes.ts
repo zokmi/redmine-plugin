@@ -1,4 +1,4 @@
-import { neutralizeUntrustedMarkers, object, pythonRepr, pythonString, records, wrapUntrusted, type JsonObject } from './formatting.js';
+import { isObject, neutralizeUntrustedMarkers, object, pythonRepr, pythonString, records, wrapUntrusted, type JsonObject } from './formatting.js';
 import { ToolError } from './tool-registry.js';
 
 const uploadKeys = ['token', 'filename', 'content_type', 'description'];
@@ -176,7 +176,11 @@ export function uncheckedFields(payload: JsonObject): string[] {
 }
 
 function formattedIgnoredValue(value: unknown): unknown {
-  return typeof value === 'string' ? wrapUntrusted(value) : value ?? null;
+  if (typeof value === 'string') return wrapUntrusted(value);
+  if (Array.isArray(value)) return value.map(formattedIgnoredValue);
+  if (isObject(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) =>
+    [neutralizeUntrustedMarkers(key), formattedIgnoredValue(item)]));
+  return value ?? null;
 }
 
 export function verifyPayload(payload: JsonObject, issue: JsonObject): Verification {

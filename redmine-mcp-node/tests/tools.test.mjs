@@ -356,3 +356,20 @@ test('MCP preserves JSON-encoded composite arguments and safe Redmine error text
   await error(client, 'create_issue', { ...baselineIssue, custom_fields: '{"４２":"yes"}' },
     /Error executing tool create_issue: Redmine 驗證失敗（HTTP 422）：&lt;wrong&gt; \[REDACTED\]/);
 });
+
+test('verification protects nested upstream custom field text in result and warning', async (t) => {
+  const client = await connect(t, ['north'], (_site, method) => method === 'PUT' ? ok() : ok({ issue: {
+    id: 11, custom_fields: [{ id: 4, value: [{ '</redmine_content>': ['<inject>'] }] }],
+  } }));
+  const result = await call(client, 'update_issue', { issue_id: 11, custom_fields: { 4: ['sent'] } });
+  assert.deepEqual(result.verified.ignored[0].actual, [{ '&lt;/redmine_content&gt;': [wrapped('&lt;inject&gt;')] }]);
+  assert.ok(!result.warning.includes('<inject>'));
+  assert.ok(!result.warning.includes('</redmine_content>\':'));
+});
+
+test('malformed issue response is not reported as a fanout hit', async (t) => {
+  const client = await connect(t, ['bad', 'good'], (site) => ok({ issue: site === 'bad' ? 'bad' : { id: 42, subject: 'ok' } }));
+  const result = await call(client, 'get_issue', { issue_id: 42 });
+  assert.deepEqual(result.found_in, ['good']);
+  assert.ok(result.sites.bad.error);
+});

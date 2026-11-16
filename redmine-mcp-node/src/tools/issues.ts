@@ -1,4 +1,4 @@
-import { neutralizeUntrustedMarkers, object, paginated, records, wrapUntrusted, type JsonObject } from '../formatting.js';
+import { isObject, neutralizeUntrustedMarkers, object, paginated, records, wrapUntrusted, type JsonObject } from '../formatting.js';
 import { formatIssueDetail, formatIssueRow } from '../issue-formatting.js';
 import { attachUploads, issuePayload, uncheckedFields, verifyPayload, warningFor } from '../issue-writes.js';
 import { clampLimit, fanOut, redactSiteSecret, requestJson, requestObject, type SiteRegistry } from '../sites.js';
@@ -53,7 +53,8 @@ export function registerIssues(tools: ToolRegistry, sites: SiteRegistry, timeout
     const query = include?.length ? { include: include.join(',') } : {};
     const result = await fanOut(sites.resolve(site), async (target, signal) => {
       const raw = await requestObject(target, 'GET', `/issues/${issue_id}.json`, { signal, query });
-      return formatIssueDetail(object(raw.issue), options);
+      if (!isObject(raw.issue)) throw new Error('Invalid issue response');
+      return formatIssueDetail(raw.issue, options);
     }, { signal, timeoutMs, noneOnNotFound: true });
     return { issue_id, found_in: result.foundIn, sites: result.payload };
   });
