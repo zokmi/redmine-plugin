@@ -128,3 +128,68 @@ test('record refresh disk-full error preserves record and returns data', { skip:
   const result = spawnSync(process.execPath, ['--experimental-test-module-mocks', 'test-support/record-acl-fixture.mjs', 'io'], {encoding:'utf8'});
   assert.equal(result.status, 0, result.stderr);
 });
+
+test('sweep archives an idle item into a Python-readable ZIP', { skip: process.platform !== 'win32' || !process.env.STORAGE_TEST_PYTHON }, async () => {
+  const {spawnSync} = await import('node:child_process');
+  const {createWindowsAttachmentStore} = await import('../dist/storage/windows-store.js');
+  const base = await mkdtemp(join(tmpdir(), 'rm-sweep-'));
+  const parent = openDirectory(base); const root = createPrivateDirectory(parent, 'cache'); closeHandle(root); closeHandle(parent);
+  try {
+    let now = new Date('2026-01-01T00:00:00Z');
+    const store = createWindowsAttachmentStore({root:join(base,'cache'), clock:() => now});
+    const stage = await store.stageDownload('https://example.com', 'sample.txt'); stage.writer.end('hello'); await once(stage.writer, 'finish');
+    const original = await store.publish(stage), item = basename(dirname(original)), site = dirname(dirname(dirname(original)));
+    now = new Date('2026-01-09T00:00:00Z'); await store.sweep();
+    const record = JSON.parse(await readFile(join(site,'records',`${item}.json`),'utf8'));
+    assert.equal(record.state, 'archived');
+    await assert.rejects(readFile(original), {code:'ENOENT'});
+    const result = spawnSync(process.env.STORAGE_TEST_PYTHON, ['-c', 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); assert z.namelist()==["sample.txt"]; assert z.read("sample.txt")==b"hello"', join(site,'archives',`${item}.zip`)], {encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+  } finally { await rm(base,{recursive:true,force:true}); }
+});
+
+test('sweep repairs published state, retains mismatched archives and expires verified archives', {skip:process.platform !== 'win32'}, async () => {
+  const {writeFile} = await import('node:fs/promises');
+  const {createWindowsAttachmentStore} = await import('../dist/storage/windows-store.js');
+  const base = await mkdtemp(join(tmpdir(), 'rm-recovery-'));
+  const parent = openDirectory(base), root = createPrivateDirectory(parent,'cache'); closeHandle(root); closeHandle(parent);
+  try {
+    let now = new Date('2026-01-01T00:00:00Z'); const store = createWindowsAttachmentStore({root:join(base,'cache'),clock:() => now});
+    const stage = await store.stageDownload('https://example.com','one.txt'); stage.writer.end('hello'); await once(stage.writer,'finish');
+    const original = await store.publish(stage), id = basename(dirname(original)), site = dirname(dirname(dirname(original)));
+    const recordPath = join(site,'records',`${id}.json`), zipPath = join(site,'archives',`${id}.zip`);
+    now = new Date('2026-01-09T00:00:00Z'); await store.sweep();
+    let record = JSON.parse(await readFile(recordPath)); const zip = await readFile(zipPath);
+    // Simulate a crash after publishing the archive and before deleting the original.
+    record.state = 'archive_published'; await writeFile(recordPath,JSON.stringify(record)); await writeFile(original,'hello');
+    await writeFile(zipPath,'corrupt'); await store.sweep();
+    assert.equal((await readFile(original)).toString(),'hello'); assert.equal(JSON.parse(await readFile(recordPath)).state,'archive_published');
+    await writeFile(zipPath,zip); await writeFile(original,'changed'); await store.sweep();
+    assert.equal((await readFile(original)).toString(),'changed'); assert.equal(JSON.parse(await readFile(recordPath)).state,'archive_published');
+    await writeFile(original,'hello'); await store.sweep();
+    await assert.rejects(readFile(original),{code:'ENOENT'}); assert.equal(JSON.parse(await readFile(recordPath)).state,'archived');
+    now = new Date('2026-02-08T00:00:00Z'); await writeFile(zipPath,'corrupt'); await store.sweep();
+    assert.equal(JSON.parse(await readFile(recordPath)).state,'archived');
+    await writeFile(zipPath,zip); await store.sweep();
+    await assert.rejects(readFile(zipPath),{code:'ENOENT'}); await assert.rejects(readFile(recordPath),{code:'ENOENT'});
+  } finally { await rm(base,{recursive:true,force:true}); }
+});
+
+test('sweep respects locks and the seven-day idle threshold', {skip:process.platform !== 'win32'}, async () => {
+  const {tryLock} = await import('../dist/storage/windows-handles.js');
+  const {createWindowsAttachmentStore} = await import('../dist/storage/windows-store.js');
+  const base = await mkdtemp(join(tmpdir(), 'rm-sweep-lock-'));
+  const parent = openDirectory(base), root = createPrivateDirectory(parent,'cache'); closeHandle(root); closeHandle(parent);
+  try {
+    let now = new Date('2026-01-01T00:00:00Z'); const store = createWindowsAttachmentStore({root:join(base,'cache'),clock:() => now});
+    const stage = await store.stageDownload('https://example.com','one.txt'); stage.writer.end('hello'); await once(stage.writer,'finish');
+    const original = await store.publish(stage), id = basename(dirname(original)), site = dirname(dirname(dirname(original))), recordPath = join(site,'records',`${id}.json`);
+    now = new Date('2026-01-07T23:59:59Z'); await store.sweep(); assert.equal(JSON.parse(await readFile(recordPath)).state,'active');
+    now = new Date('2026-01-08T00:00:00Z');
+    const locks = openDirectory(join(site,'locks')), itemLock = tryLock(locks,`${id}.lock`);
+    try { await store.sweep(); assert.equal(JSON.parse(await readFile(recordPath)).state,'active'); } finally {closeHandle(itemLock); closeHandle(locks);}
+    const cache = openDirectory(join(base,'cache')), global = tryLock(cache,'.sweep.lock');
+    try { await store.sweep(); assert.equal(JSON.parse(await readFile(recordPath)).state,'active'); } finally {closeHandle(global); closeHandle(cache);}
+    await store.sweep(); assert.equal(JSON.parse(await readFile(recordPath)).state,'archived');
+  } finally { await rm(base,{recursive:true,force:true}); }
+});

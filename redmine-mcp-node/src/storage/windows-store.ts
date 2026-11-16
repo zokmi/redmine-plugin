@@ -36,13 +36,16 @@ function jsonWrite(parent: H, name: string, record: ItemRecord, replace: boolean
   try { verifyPrivateHandle(h); writeHandle(h, Buffer.from(JSON.stringify(record), 'utf8')); flushHandle(h); renameHandle(h, parent, name, replace); }
   catch (e) { try { deleteHandle(h); } catch {} throw e; } finally { closeHandle(h); }
 }
-export function createWindowsAttachmentStore(options: {root: string; clock?: () => Date}): AttachmentStore {
+export function createWindowsAttachmentStore(options: {root: string; clock?: () => Date}): AttachmentStore & { sweep(now?: Date, signal?: AbortSignal): Promise<void> } {
   if (process.platform !== 'win32' || !path.win32.isAbsolute(options.root)) throw new Error('Windows absolute root required');
   const rootPath = path.win32.resolve(options.root), clock = options.clock ?? (() => new Date());
   const stages = new WeakSet<object>();
   function root(handles: H[]): H { const h = openDirectory(rootPath); handles.push(h); verifyPrivateHandle(h, true); return h; }
   function lock(parent: H, id: string, handles: H[]): H { const h = tryLock(parent, `${id}.lock`); if (!h) throw new Error('Attachment is locked'); handles.push(h); verifyPrivateHandle(h); return h; }
   return {
+    async sweep(now = clock(), signal) {
+      await sweepWindows(rootPath, root, now, signal);
+    },
     async stageDownload(siteUrl, name) {
       filename(name); const key = siteStorageKey(siteUrl), id = randomUUID().replaceAll('-', ''), now = timestamp(clock), handles: H[] = [];
       try {
@@ -97,4 +100,117 @@ export function createWindowsAttachmentStore(options: {root: string; clock?: () 
       } finally { closeAll(handles); }
     },
   };
+}
+import { readdir } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { ZipFile as ZipWriter } from 'yazl';
+import { RandomAccessReader, fromRandomAccessReaderPromise } from 'yauzl';
+import { createRequire } from 'node:module';
+import { openGuardedFile, seekHandle } from './windows-handles.js';
+const crc32 = createRequire(import.meta.url)('buffer-crc32') as { unsigned(data: Buffer, previous: number): number };
+
+function guarded(parent: H, name: string, handles: H[]): H {
+  const h = openGuardedFile(parent, name); handles.push(h); verifyPrivateHandle(h); return h;
+}
+function streamRange(h: H, start: number, end: number): Readable {
+  let position = start;
+  return new Readable({read() { try { if (position >= end) { this.push(null); return; } seekHandle(h, position); const chunk = readHandle(h, Math.min(65536, end-position)); if (!chunk.length) throw new Error('Unexpected end of file'); position += chunk.length; this.push(chunk); } catch (error) { this.destroy(error as Error); } }});
+}
+function fingerprint(h: H): {size: number; sha256: string} {
+  seekHandle(h, 0); const hash = createHash('sha256'); let size = 0, b: Buffer;
+  while ((b = readHandle(h, 65536)).length) { size += b.length; if (!Number.isSafeInteger(size)) throw new Error('File too large'); hash.update(b); }
+  return {size, sha256:hash.digest('hex')};
+}
+function verifySource(h: H, r: ItemRecord): void { const v = fingerprint(h); if (v.size !== r.size || v.sha256 !== r.sha256) throw new Error('Original mismatch'); }
+class HandleReader extends RandomAccessReader {
+  constructor(private readonly handle: H) { super(); }
+  _readStreamForRange(start: number, end: number): Readable { return streamRange(this.handle, start, end); }
+  close(callback: (error: Error | null) => void): void { callback(null); }
+}
+async function verifyZip(h: H, r: ItemRecord): Promise<void> {
+  const size = fingerprint(h).size;
+  const zip = await fromRandomAccessReaderPromise(new HandleReader(h), size, {lazyEntries:true, autoClose:false, strictFileNames:true});
+  try {
+    if (zip.entryCount !== 1) throw new Error('Archive entry count mismatch');
+    let count = 0;
+    for await (const entry of zip.eachEntry()) {
+      count++;
+      if (entry.fileName !== r.filename || entry.uncompressedSize !== r.size) throw new Error('Archive member mismatch');
+      const stream = await zip.openReadStreamPromise(entry); const hash = createHash('sha256'); let size = 0, crc = 0;
+      for await (const raw of stream) { const chunk = Buffer.from(raw); size += chunk.length; if (size > r.size) throw new Error('Archive size exceeded'); hash.update(chunk); crc = crc32.unsigned(chunk, crc); }
+      if (size !== r.size || hash.digest('hex') !== r.sha256 || crc !== entry.crc32) throw new Error('Archive content mismatch');
+    }
+    if (count !== 1) throw new Error('Archive entry missing');
+  } finally { zip.close(); }
+}
+async function writeZip(source: H, output: H, record: ItemRecord): Promise<void> {
+  const zip = new ZipWriter(); zip.addReadStream(streamRange(source, 0, record.size), record.filename, {size:record.size, forceZip64Format:true}); zip.end();
+  await pipeline(zip.outputStream, new Writable({write(chunk: Buffer, _encoding, cb) { try { writeHandle(output, Buffer.from(chunk)); cb(); } catch (e) { cb(e as Error); } }}));
+  flushHandle(output); await verifyZip(output, record);
+}
+async function sweepWindows(rootPath: string, openRoot: (handles: H[]) => H, now: Date, signal?: AbortSignal): Promise<void> {
+  if (!Number.isFinite(now.getTime())) throw new Error('Invalid sweep time');
+  const outer: H[] = [];
+  try {
+    const root = openRoot(outer), global = tryLock(root, '.sweep.lock');
+    if (!global) return; outer.push(global); verifyPrivateHandle(global);
+    for (const key of await readdir(rootPath)) {
+      if (signal?.aborted) return;
+      if (!/^[0-9a-f]{64}$/.test(key)) continue;
+      const siteHandles: H[] = [];
+      try {
+        const site = child(root, key, false, siteHandles), records = child(site, 'records', false, siteHandles), locks = child(site, 'locks', false, siteHandles);
+        for (const name of await readdir(path.win32.join(rootPath, key, 'records'))) {
+          if (signal?.aborted) return;
+          if (!/^[0-9a-f]{32}\.json$/.test(name)) continue;
+          const handles: H[] = [], id = name.slice(0, -5);
+          try {
+            const itemLock = tryLock(locks, `${id}.lock`); if (!itemLock) continue; handles.push(itemLock); verifyPrivateHandle(itemLock);
+            const metadata = file(records, name, 'open', 'read', handles);
+            let rec = parseItemRecord(JSON.parse(bounded(metadata, 65536).toString('utf8')));
+            closeHandle(metadata); handles.splice(handles.indexOf(metadata), 1);
+            if (rec.site_key !== key || rec.item_id !== id) throw new Error('Record identity mismatch');
+            filename(rec.filename);
+            if ([rec.created_at, rec.last_used_at, rec.archived_at ?? rec.created_at].some(t => Date.parse(t) > now.getTime())) continue;
+            if (rec.state === 'active' && now.getTime() - Date.parse(rec.last_used_at) < 604800000) continue;
+            const archives = child(site, 'archives', rec.state === 'active', handles), zipName = `${id}.zip`;
+            if (rec.state !== 'archived') {
+              let source: H | undefined;
+              let archive: H | undefined;
+              try { const active = child(site, 'active', false, handles), item = child(active, id, false, handles); source = guarded(item, rec.filename, handles); }
+              catch (e) { if (rec.state !== 'archive_published' || !(e instanceof Error) || !e.message.includes('NTSTATUS -1073741772')) throw e; }
+              if (rec.state === 'active') {
+                if (!source) throw new Error('Original missing');
+                rec = {...rec, ...fingerprint(source)};
+                try { archive = guarded(archives, zipName, handles); }
+                catch (e) { if (!(e instanceof Error) || !e.message.includes('NTSTATUS -1073741772')) throw e; }
+                if (!archive) {
+                  const temp = file(archives, `.${id}.${randomUUID().replaceAll('-', '')}.tmp`, 'create', 'modify', handles);
+                  try { await writeZip(source, temp, rec); verifySource(source, rec); renameHandle(temp, archives, zipName); }
+                  catch (e) { try { deleteHandle(temp); } catch {} throw e; }
+                  closeHandle(temp); handles.splice(handles.indexOf(temp), 1);
+                  archive = guarded(archives, zipName, handles);
+                }
+                await verifyZip(archive, rec); verifySource(source, rec);
+                rec = {...rec, state:'archive_published', archived_at:timestamp(() => now)};
+                jsonWrite(records, name, rec, true);
+              }
+              archive ??= guarded(archives, zipName, handles); await verifyZip(archive, rec);
+              if (source) { verifySource(source, rec); await verifyZip(archive, rec); deleteHandle(source); }
+              rec = {...rec, state:'archived'}; jsonWrite(records, name, rec, true);
+              continue;
+            }
+            if (rec.archived_at && now.getTime() - Date.parse(rec.archived_at) >= 2592000000) {
+              const archive = guarded(archives, zipName, handles); await verifyZip(archive, rec);
+              const recordHandle = guarded(records, name, handles);
+              const current = parseItemRecord(JSON.parse(bounded(recordHandle, 65536).toString('utf8')));
+              if (JSON.stringify(current) !== JSON.stringify(rec)) throw new Error('Record changed');
+              deleteHandle(archive); deleteHandle(recordHandle);
+            }
+          } catch { /* Retain uncertain items. */ } finally { closeAll(handles); }
+        }
+      } catch { /* Ignore unsafe or unavailable sites. */ } finally { closeAll(siteHandles); }
+    }
+  } catch { /* An unsafe or unavailable root is a no-op. */ } finally { closeAll(outer); }
 }
