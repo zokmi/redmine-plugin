@@ -3,6 +3,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Settings } from './config.js';
 import { createSiteRegistry, redactSiteSecret, type SiteRegistry, type TransportFactory } from './sites.js';
 import { bindToolRegistry } from './tool-registry.js';
+import { registerAttachments } from './tools/attachments.js';
+import { unavailableStore, type AttachmentStore } from './storage/store.js';
 import { registerIssues } from './tools/issues.js';
 import { registerMetadata } from './tools/metadata.js';
 import { registerProjects } from './tools/projects.js';
@@ -38,6 +40,7 @@ export interface ServerDependencies {
   readonly registry?: SiteRegistry;
   readonly transportFactory?: TransportFactory;
   readonly fanoutTimeoutMs?: number;
+  readonly attachmentStore?: AttachmentStore;
 }
 
 export function createServer(settings: Settings, dependencies: ServerDependencies = {}): McpServer {
@@ -63,6 +66,7 @@ export function createServer(settings: Settings, dependencies: ServerDependencie
     });
     registerMetadata(tools, sites, dependencies.fanoutTimeoutMs);
     registerIssues(tools, sites, dependencies.fanoutTimeoutMs);
+    registerAttachments(tools, sites, dependencies.attachmentStore ?? unavailableStore, dependencies.fanoutTimeoutMs);
     registerProjects(tools, sites);
     return mcp;
   } catch (error) {

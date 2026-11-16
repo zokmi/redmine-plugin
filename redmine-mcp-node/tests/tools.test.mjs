@@ -67,11 +67,11 @@ function withoutSchemaTitles(value) {
     .map(([key, field]) => [key, withoutSchemaTitles(field)]));
 }
 
-test('MCP tools/list matches all thirteen migrated v0.17.4 tool contracts', async (t) => {
+test('MCP tools/list matches all sixteen migrated v0.17.4 tool contracts', async (t) => {
   const closed = [];
   const client = await connect(t, ['north', 'south'], () => assert.fail('Unexpected network request'), { closed });
   const { tools } = await client.listTools();
-  const expected = fixture.tools.filter((tool) => !['list_attachments', 'download_attachment', 'upload_attachment'].includes(tool.name));
+  const expected = fixture.tools;
   assert.deepEqual(tools.map((tool) => tool.name), expected.map((tool) => tool.name));
   assert.deepEqual(withoutSchemaTitles(tools), withoutSchemaTitles(expected));
   assert.deepEqual(client.getServerVersion(), { name: 'redmine', version });
