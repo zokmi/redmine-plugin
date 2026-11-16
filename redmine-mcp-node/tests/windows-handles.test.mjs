@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openDirectory, openChildDirectory, closeHandle, tryLock } from '../dist/storage/windows-handles.js';
+import { openDirectory, openChildDirectory, closeHandle, tryLock, openFile, createDirectory, readHandle, writeHandle, flushHandle, renameHandle, deleteHandle } from '../dist/storage/windows-handles.js';
 
 test('relative directory open rejects a junction to an outside directory', {skip: process.platform !== 'win32'}, async () => {
   const root = await mkdtemp(join(tmpdir(), 'rm-native-'));
@@ -61,4 +61,32 @@ test('Python one-byte lock blocks Node until release', {skip: process.platform !
     child.stdin.end('x'); await once(child, 'exit');
     const acquired = tryLock(handle, 'item.lock'); assert.ok(acquired); closeHandle(acquired);
   } finally { child.kill(); closeHandle(handle); await rm(root, {recursive:true, force:true}); }
+});
+
+test('pins ancestor chain and performs relative file operations', {skip: process.platform !== 'win32'}, async () => {
+  const {rename, readFile} = await import('node:fs/promises');
+  const root = await mkdtemp(join(tmpdir(), 'rm-operations-'));
+  await mkdir(join(root, 'ancestor')); await mkdir(join(root, 'ancestor', 'leaf'));
+  const parent = openDirectory(join(root, 'ancestor', 'leaf'));
+  try {
+    await assert.rejects(rename(join(root, 'ancestor'), join(root, 'moved')));
+    await symlink(root, join(root, 'ancestor', 'leaf', 'junction'), 'junction');
+    assert.throws(() => openFile(parent, 'junction'));
+    const sub = createDirectory(parent, 'sub'); closeHandle(sub);
+    let file = openFile(parent, 'source', 'create');
+    writeHandle(file, Buffer.from('hello')); flushHandle(file);
+    renameHandle(file, parent, 'target'); closeHandle(file);
+    assert.equal(await readFile(join(root, 'ancestor', 'leaf', 'target'), 'utf8'), 'hello');
+    const readOnly = openFile(parent, 'target', 'open', 'read');
+    assert.equal(readHandle(readOnly, 20).toString(), 'hello');
+    assert.throws(() => writeHandle(readOnly, Buffer.from('x')));
+    assert.throws(() => deleteHandle(readOnly)); closeHandle(readOnly);
+    file = openFile(parent, 'target');
+    assert.equal(readHandle(file, 20).toString(), 'hello');
+    const other = openFile(parent, 'other', 'create'); closeHandle(other);
+    assert.throws(() => renameHandle(file, parent, 'other'));
+    renameHandle(file, parent, 'other', true);
+    deleteHandle(file); closeHandle(file);
+    await assert.rejects(readFile(join(root, 'ancestor', 'leaf', 'other')));
+  } finally { closeHandle(parent); await rm(root, {recursive:true, force:true}); }
 });
