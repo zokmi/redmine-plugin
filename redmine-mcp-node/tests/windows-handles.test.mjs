@@ -90,3 +90,27 @@ test('pins ancestor chain and performs relative file operations', {skip: process
     await assert.rejects(readFile(join(root, 'ancestor', 'leaf', 'other')));
   } finally { closeHandle(parent); await rm(root, {recursive:true, force:true}); }
 });
+
+test('rejects hard-linked files and rechecks an already-open handle', {skip: process.platform !== 'win32'}, async () => {
+  const {link, writeFile, readFile, unlink} = await import('node:fs/promises');
+  const root = await mkdtemp(join(tmpdir(), 'rm-hardlink-'));
+  await mkdir(join(root, 'managed')); await writeFile(join(root, 'outside'), 'untouched');
+  await link(join(root, 'outside'), join(root, 'managed', 'alias'));
+  const parent = openDirectory(join(root, 'managed'));
+  try {
+    assert.throws(() => openFile(parent, 'alias'));
+    assert.throws(() => openFile(parent, 'alias', 'open', 'read'));
+    assert.throws(() => tryLock(parent, 'alias'));
+    assert.equal(await readFile(join(root, 'outside'), 'utf8'), 'untouched');
+    await unlink(join(root, 'managed', 'alias'));
+    await writeFile(join(root, 'managed', 'file'), 'safe');
+    const file = openFile(parent, 'file');
+    try {
+      await link(join(root, 'managed', 'file'), join(root, 'second'));
+      assert.throws(() => writeHandle(file, Buffer.from('changed')));
+      assert.throws(() => renameHandle(file, parent, 'renamed'));
+      assert.throws(() => deleteHandle(file));
+    } finally { closeHandle(file); }
+    assert.equal(await readFile(join(root, 'second'), 'utf8'), 'safe');
+  } finally { closeHandle(parent); await rm(root, {recursive:true, force:true}); }
+});
