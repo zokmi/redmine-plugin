@@ -7,15 +7,62 @@ $node = (Get-Command node.exe -CommandType Application | Select-Object -First 1)
 $version = & $node --version
 if ($version -notmatch '^v(\d+)\.' -or [int]$Matches[1] -lt 22) { throw 'Redmine MCP requires Node.js 22 or later.' }
 $tokenName = 'REDMINE_MCP_LOCAL_TOKEN'
-$token = [Environment]::GetEnvironmentVariable($tokenName, 'Process')
-if (-not $token) { $token = [Environment]::GetEnvironmentVariable($tokenName, 'User') }
+function Get-UserToken { return [Environment]::GetEnvironmentVariable($tokenName, 'User') }
+$token = Get-UserToken
+$originalUserToken = $token
+$persistToken = $false
+if (-not $token) { $token = [Environment]::GetEnvironmentVariable($tokenName, 'Process'); if ($token -cmatch '\A[A-Za-z0-9_-]{32,}\z') { $persistToken = $true } }
 if (-not $token) {
     $bytes = New-Object byte[] 32; $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
     try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     $token = [BitConverter]::ToString($bytes).Replace('-', '')
-    [Environment]::SetEnvironmentVariable($tokenName, $token, 'User')
+    $persistToken = $true
 }
 if ($token -cnotmatch '\A[A-Za-z0-9_-]{32,}\z') { throw "$tokenName must contain at least 32 URL-safe characters." }
+# A process-held exclusive handle serializes staging, stop and manifest publication.
+$null = New-Item -ItemType Directory -Path $serviceRoot -Force
+try { $installLock = [IO.File]::Open((Join-Path $serviceRoot 'install.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+catch { throw 'Another service installation is in progress.' }
+function Context-Fingerprint([string]$salt, $item) {
+    $values = [ordered]@{ token = $token; node = $node }
+    $names = @(Get-ChildItem Env: | Where-Object { ($_.Name -like 'REDMINE_*' -and $_.Name -ne $tokenName) -or $_.Name -in @('APPDATA','LOCALAPPDATA','USERPROFILE','HOME','HOMEDRIVE','HOMEPATH','XDG_CONFIG_HOME') } | ForEach-Object { $_.Name }) | Sort-Object -Unique
+    foreach ($name in $names) { $values[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+    if ($env:REDMINE_CONFIG) {
+        $config = $env:REDMINE_CONFIG.Trim()
+        if ($config -eq '~' -or $config.StartsWith('~/') -or $config.StartsWith('~\')) { $config = Join-Path $env:USERPROFILE $config.Substring(1).TrimStart('\','/') }
+        if (-not [IO.Path]::IsPathRooted($config)) { throw 'REDMINE_CONFIG must be absolute for service installation.' }
+    } else {
+        $roaming = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $env:USERPROFILE 'AppData/Roaming' }
+        $config = Join-Path $roaming 'redmine-mcp/config.toml'
+        $legacyConfig = if ($item.engine -eq 'node') { Join-Path $serviceRoot 'redmine-mcp/config.toml' } else { Join-Path (Join-Path $serviceRoot $item.deployment) '.venv/Lib/config.toml' }
+        if (Test-Path -LiteralPath $legacyConfig -PathType Leaf) { $config = $legacyConfig }
+    }
+    $values['configPath'] = $config
+    if (Test-Path -LiteralPath $config -PathType Leaf) { $values['configBytes'] = [Convert]::ToBase64String([IO.File]::ReadAllBytes($config)) }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $bytes = [Text.Encoding]::UTF8.GetBytes($salt + ($values | ConvertTo-Json -Compress)); return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+function Listener-Owned([int]$port, [int]$pidValue) {
+    $lines = @(netstat.exe -ano -p tcp)
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $matches = @($lines | Where-Object { $_ -match ('^\s*TCP\s+127\.0\.0\.1:' + $port + '\s+\S+\s+LISTENING\s+(\d+)\s*$') })
+    return $matches.Count -eq 1 -and $matches[0] -match ('\s' + $pidValue + '\s*$')
+}
+function Test-Authorized([int]$port, [int]$pidValue) {
+    if (-not (Listener-Owned $port $pidValue)) { return $false }
+    $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"installer-health","version":"1"}}}'
+    try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port/mcp" -Method Post -Headers @{ Authorization="Bearer $token"; Accept='application/json, text/event-stream' } -ContentType 'application/json' -Body $body -UseBasicParsing -TimeoutSec 5
+        if ($response.StatusCode -ne 200) { return $false }
+        $payload = $response.Content
+        if ($payload -match '(?m)^data:\s*(.+)\s*$') { $payload = $Matches[1] }
+        $result = $payload | ConvertFrom-Json
+        $valid = $result.id -eq 1 -and $null -ne $result.result.serverInfo -and $null -ne $result.result.protocolVersion -and (Listener-Owned $port $pidValue)
+        $session = $response.Headers['mcp-session-id']
+        if ($session) { try { $null = Invoke-WebRequest -Uri "http://127.0.0.1:$port/mcp" -Method Delete -Headers @{ Authorization="Bearer $token"; 'mcp-session-id'=[string]$session } -UseBasicParsing -TimeoutSec 5 } catch {} }
+        return $valid
+    } catch { return $false }
+}
 $old = $null
 if (Test-Path -LiteralPath $statePath -PathType Leaf) {
     $old = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
@@ -23,6 +70,11 @@ if (Test-Path -LiteralPath $statePath -PathType Leaf) {
 }
 if ($Restart -and -not $old) { throw 'Install the local service once before using -Restart.' }
 if ($Restart -and $UseNode) { throw '-Restart uses the installed engine; omit -UseNode.' }
+if ($old -and -not $old.contextSalt -and -not $Restart) { throw 'Legacy deployment has no saved context; first restart the existing Python service to adopt its current environment.' }
+if ($old -and $old.contextSalt) {
+    if ($old.contextSalt -cnotmatch '\A[a-f0-9]{32}\z' -or $old.contextHash -cnotmatch '\A[a-f0-9]{64}\z' -or (Context-Fingerprint $old.contextSalt $old) -cne $old.contextHash) { throw 'Service environment or effective token changed; refusing to stop the existing deployment.' }
+}
+if ($old -and -not $old.port) { $old | Add-Member -NotePropertyName port -NotePropertyValue 18765 }
 if ($old -and $old.port -and ($Restart -or -not $PSBoundParameters.ContainsKey('Port'))) { $Port = [int]$old.port }
 $engine = if ($Restart) { if ($old.engine) { $old.engine } else { 'python' } } elseif ($UseNode) { 'node' } else { 'python' }
 $id = if ($Restart) { $old.deployment } else { [Guid]::NewGuid().ToString('N') }
@@ -38,10 +90,8 @@ function Stop-Owned($item) {
     if (-not $p) { return $false }
     $expected = if ($item.image) { $item.image } else { $node }
     if ($p.Path -ne $expected -or [string]$p.StartTime.ToUniversalTime().Ticks -ne [string]$item.startedAt) { throw 'Active PID identity does not match manifest; refusing to stop it.' }
-    $oldPort = if ($item.port) { [int]$item.port } else { $Port }
-    $healthy = $false
-    try { $null = Invoke-WebRequest -Uri "http://127.0.0.1:$oldPort/mcp" -UseBasicParsing -TimeoutSec 2 } catch { $healthy = $_.Exception.Response.StatusCode.value__ -eq 401 }
-    if (-not $healthy) { throw 'Previous service health could not be verified; refusing to stop it.' }
+    $oldPort = if ($item.port) { [int]$item.port } else { 18765 }
+    if (-not (Test-Authorized $oldPort $p.Id)) { throw 'Previous service identity or authenticated health could not be verified; refusing to stop it.' }
     Stop-Process -InputObject $p
     if (-not $p.WaitForExit(5000)) { throw 'Previous service did not stop.' }
     return $true
@@ -60,10 +110,10 @@ function Start-ServiceDeployment($item) {
         while ((Get-Date) -lt $deadline) {
             $p.Refresh(); if ($p.HasExited) { throw "Service exited; see $err" }
             if (Select-String -LiteralPath $out -SimpleMatch "Redmine MCP Node.js listening at http://127.0.0.1:$Port/mcp" -Quiet -ErrorAction SilentlyContinue) {
-                $healthy = $false
-                try { $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/mcp" -UseBasicParsing -TimeoutSec 2; $healthy = $response.StatusCode -eq 401 }
-                catch { $healthy = $_.Exception.Response.StatusCode.value__ -eq 401 }
-                if ($healthy) { return @{ deployment=$item.deployment; engine=$item.engine; pid=$p.Id; startedAt=[string]$p.StartTime.ToUniversalTime().Ticks; image=$node; port=$Port } }
+                if (Test-Authorized $Port $p.Id) {
+                    $salt = [Guid]::NewGuid().ToString('N')
+                    return @{ deployment=$item.deployment; engine=$item.engine; pid=$p.Id; startedAt=[string]$p.StartTime.ToUniversalTime().Ticks; image=$node; port=$Port; contextSalt=$salt; contextHash=(Context-Fingerprint $salt $item) }
+                }
             }
             Start-Sleep -Milliseconds 200
         }
@@ -102,15 +152,24 @@ if ($engine -eq 'node') {
     if ($LASTEXITCODE -ne 0) { throw 'Attachment storage is incompatible; existing data and permissions were preserved.' }
 }
 if ($old) { if (-not $old.engine) { $old | Add-Member -NotePropertyName engine -NotePropertyValue 'python' }; Validate-Runtime $old }
-$stopped = $false; $started = $null
+$stopped = $false; $started = $null; $persisted = $false
 try {
+    $currentUserToken = Get-UserToken
+    if ([string]$currentUserToken -cne [string]$originalUserToken) { throw 'User service token changed; refusing to stop the existing deployment.' }
+    if ($old -and $old.contextSalt -and (Context-Fingerprint $old.contextSalt $old) -cne $old.contextHash) { throw 'Service environment changed while preparing the deployment.' }
+    $rollbackSalt = [Guid]::NewGuid().ToString('N')
+    $rollbackHash = if ($old) { Context-Fingerprint $rollbackSalt $old } else { $null }
+    $candidateSalt = [Guid]::NewGuid().ToString('N')
+    $candidateHash = Context-Fingerprint $candidateSalt $item
     if ($old) { $stopped = Stop-Owned $old }
     $started = Start-ServiceDeployment $item
+    if ((Context-Fingerprint $candidateSalt $item) -cne $candidateHash -or [string](Get-UserToken) -cne [string]$originalUserToken) { throw 'Service environment changed during startup.' }
+    if ($persistToken) { [Environment]::SetEnvironmentVariable($tokenName, $token, 'User'); $persisted = $true }
     Save-State $started
     Write-Output "Redmine MCP started (PID $($started.pid)). Logs: $deployment"
 } catch {
     $failure = $_
     if ($started) { $null = Stop-Owned $started }
-    if ($stopped) { try { if ($old.port) { $Port = [int]$old.port }; $restored = Start-ServiceDeployment $old; Save-State $restored; Write-Warning 'Previous deployment restored.' } catch { throw "Startup failed and rollback failed: $failure; $_" } }
+    if ($stopped) { try { $expectedUserToken = if ($persisted) { $token } else { $originalUserToken }; if ((Context-Fingerprint $rollbackSalt $old) -cne $rollbackHash -or [string](Get-UserToken) -cne [string]$expectedUserToken) { throw 'Prior environment changed; automatic rollback is unsafe.' }; if ($old.port) { $Port = [int]$old.port }; $restored = Start-ServiceDeployment $old; Save-State $restored; Write-Warning 'Previous deployment restored.' } catch { throw "Startup failed and rollback failed: $failure; $_" } }
     throw $failure
 }
