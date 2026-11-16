@@ -124,7 +124,7 @@ test('private config creation creates missing parent without inheriting an open 
   const dir = await mkdtemp(join(tmpdir(), 'redmine-cli-'));
   try {
     const file = join(dir, 'new-private', 'config.toml');
-    writePrivate(file, 'secret', false);
+    writePrivate(file, 'secret', {exists:false});
     assert.equal(await (await import('node:fs/promises')).readFile(file,'utf8'), 'secret');
   } finally { await rm(dir,{recursive:true,force:true}); }
 });
@@ -159,4 +159,80 @@ test('secret prompt masks characters and restores raw mode', async () => {
   assert.equal(await pending, 'private-key');
   assert.equal(input.isRaw, false);
   assert.doesNotMatch(displayed, /private-key/);
+});
+
+test('concurrent external edit during verification aborts without losing changes', async () => {
+  const {createServer} = await import('node:http'); const {spawn} = await import('node:child_process');
+  const {readFile} = await import('node:fs/promises');
+  const dir = await mkdtemp(join(tmpdir(), 'redmine-cli-'));
+  let respond; const requested = new Promise(resolve => { respond = resolve; });
+  let reply; const server = createServer((_req,res) => { reply = res; respond(); });
+  await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
+  try {
+    const url = `http://127.0.0.1:${server.address().port}`; const file = join(dir,'config.toml');
+    const original = `[sites.main]\nurl = "${url}"\napi_key = "fixture-key"\nallow_insecure_http = true\n`;
+    await writeFile(file,original);
+    const child = spawn(process.execPath,['dist/cli.js','config','set-site','main','--url',url,'--yes'],{env:{...process.env,REDMINE_CONFIG:file},stdio:['ignore','pipe','pipe']});
+    let error=''; child.stderr.on('data', x => error += x); const finished = new Promise(resolve => child.on('exit',resolve));
+    await requested; const changed = original + '# external edit\n'; await writeFile(file,changed);
+    reply.writeHead(200,{'content-type':'application/json'}); reply.end('{"user":{"login":"fixture"}}');
+    assert.notEqual(await finished,0,error); assert.equal(await readFile(file,'utf8'),changed);
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(dir,{recursive:true,force:true}); }
+});
+
+test('clearing a field retains its inline comment', async () => {
+  const {readFile} = await import('node:fs/promises'); const dir = await mkdtemp(join(tmpdir(), 'redmine-cli-'));
+  try {
+    const file = join(dir,'config.toml'); await writeFile(file,'[sites.main]\nurl = "https://example.test"\napi_key = "fixture-key"\ndescription = "something # value" # keep this note\n');
+    const result = spawnSync(process.execPath,['dist/cli.js','config','set-site','main','--clear-description','--yes'],{env:{...process.env,REDMINE_CONFIG:file},encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr); const text = await readFile(file,'utf8'); assert.match(text,/^\s*# keep this note$/m); assert.doesNotMatch(text,/description/);
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+test('removing a site retains its standalone and inline comments', async () => {
+  const {readFile} = await import('node:fs/promises'); const dir = await mkdtemp(join(tmpdir(), 'redmine-cli-'));
+  try {
+    const file = join(dir,'config.toml'); await writeFile(file,'[sites.main] # site note\n# internal note\nurl = "https://example.test" # url note\napi_key = "fixture-key"\n[sites.other]\nurl = "https://other.test"\napi_key = "other-key"\n');
+    const result = spawnSync(process.execPath,['dist/cli.js','config','remove-site','main','--yes'],{env:{...process.env,REDMINE_CONFIG:file},encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr); const text = await readFile(file,'utf8');
+    assert.match(text,/# site note/); assert.match(text,/# internal note/); assert.match(text,/# url note/); assert.doesNotMatch(text,/\[sites.main\]/);
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+test('snapshot rejects replacement even when external contents are identical', {skip:process.platform !== 'win32'}, async () => {
+  const {captureSnapshot,writePrivate} = await import('../dist/config-write.js'); const dir = await mkdtemp(join(tmpdir(), 'redmine-cli-'));
+  try {
+    const {rename,readFile} = await import('node:fs/promises'); const file=join(dir,'config.toml'); const replacement=join(dir,'replacement');
+    await writeFile(file,'same'); const snapshot=captureSnapshot(file); await writeFile(replacement,'same'); await rename(replacement,file);
+    assert.throws(() => writePrivate(file,'changed',snapshot), /其他程序修改/); assert.equal(await readFile(file,'utf8'),'same');
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+test('snapshot of missing config never replaces a newly created config', {skip:process.platform !== 'win32'}, async () => {
+  const {captureSnapshot,writePrivate} = await import('../dist/config-write.js'); const dir = await mkdtemp(join(tmpdir(), 'redmine-cli-'));
+  try {
+    const {readFile} = await import('node:fs/promises'); const file=join(dir,'config.toml'); const snapshot=captureSnapshot(file);
+    await writeFile(file,'external'); assert.throws(() => writePrivate(file,'changed',snapshot)); assert.equal(await readFile(file,'utf8'),'external');
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+test('removing a site retains comments after multiline values', async () => {
+  const {readFile} = await import('node:fs/promises'); const dir = await mkdtemp(join(tmpdir(), 'redmine-cli-'));
+  try {
+    const file=join(dir,'config.toml'); await writeFile(file,'[sites.main]\nurl = "https://example.test"\napi_key = "fixture-key"\ndescription = """first\n# inside value\nlast""" # keep multiline note\n[sites.other]\nurl = "https://other.test"\napi_key = "other-key"\n');
+    const result=spawnSync(process.execPath,['dist/cli.js','config','remove-site','main','--yes'],{env:{...process.env,REDMINE_CONFIG:file},encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr); const text=await readFile(file,'utf8'); assert.match(text,/# keep multiline note/); assert.doesNotMatch(text,/# inside value/);
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+test('config writer refuses a cooperating writer holding the same lock', {skip:process.platform !== 'win32'}, async () => {
+  const {captureSnapshot,writePrivate} = await import('../dist/config-write.js');
+  const {openDirectory,tryLock,closeHandle} = await import('../dist/storage/windows-handles.js');
+  const {createHash} = await import('node:crypto'); const {readFile} = await import('node:fs/promises');
+  const dir=await mkdtemp(join(tmpdir(),'redmine-cli-')); let parent, lock;
+  try {
+    const file=join(dir,'config.toml'); await writeFile(file,'old'); const snapshot=captureSnapshot(file); parent=openDirectory(dir);
+    const name=`.redmine-config-${createHash('sha256').update('config.toml').digest('hex')}.lock`; lock=tryLock(parent,name); assert.ok(lock);
+    assert.throws(() => writePrivate(file,'new',snapshot),/另一個程序/); assert.equal(await readFile(file,'utf8'),'old');
+  } finally { if(lock) closeHandle(lock); if(parent) closeHandle(parent); await rm(dir,{recursive:true,force:true}); }
 });

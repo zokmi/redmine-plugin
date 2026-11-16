@@ -31,7 +31,7 @@ export async function showConfig(env: NodeJS.ProcessEnv): Promise<void> {
 
 import { isDeepStrictEqual } from 'node:util';
 import { loadSettings } from './config.js';
-import { writePrivate } from './config-write.js';
+import { captureSnapshot, writePrivate } from './config-write.js';
 import { createTransport } from './transport.js';
 import { createInterface } from 'node:readline/promises';
 
@@ -45,6 +45,19 @@ function same(a: unknown, b: unknown): boolean { return isDeepStrictEqual(compar
 function parsed(text: string): Record<string, any> {
   try { return parse(text, {joiner:'\n', bigint:true}) as Record<string, any>; }
   catch { throw new ConfigError('參數檔格式錯誤，未修改'); }
+}
+function inlineComment(statement: string): string | null {
+  const body = statement.replace(/\r?\n$/, '');
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] !== '#') continue;
+    const prefix = body.slice(0, i);
+    try {
+      parsed(prefix);
+      if (!prefix.trim()) continue;
+      return body.slice(i).split(/\r?\n/, 1)[0];
+    } catch { /* A hash within a string is not a comment. */ }
+  }
+  return null;
 }
 function editLines(text: string, section: string | null, changes: Record<string, string | number | null>, remove = false): string {
   const lines = text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
@@ -74,7 +87,16 @@ function editLines(text: string, section: string | null, changes: Record<string,
   if (!found) throw new ConfigError('找不到可安全編輯的站台區塊');
   if (remove) {
     while (end > start + 1 && (!lines[end - 1].trim() || lines[end - 1].trimStart().startsWith('#'))) end--;
-    lines.splice(start, end - start); return lines.join('');
+    const comments: string[] = [];
+    for (let i = start; i < end; i++) {
+      const span = spans.find(item => item.start <= i && i < item.end);
+      if (!span && lines[i].trimStart().startsWith('#')) comments.push(lines[i]);
+      else if (span && span.start === i) {
+        const comment = inlineComment(lines.slice(span.start, span.end).join(''));
+        if (comment) comments.push(`${comment}\n`);
+      }
+    }
+    lines.splice(start, end - start, ...comments); return lines.join('');
   }
   for (const [key, value] of Object.entries(changes)) {
     let index = -1;
@@ -87,7 +109,11 @@ function editLines(text: string, section: string | null, changes: Record<string,
       }
     }
     if (index >= 0) {
-      if (value === null) { lines.splice(index, 1); end--; }
+      if (value === null) {
+        const comment = inlineComment(lines[index]);
+        if (comment) lines[index] = `${comment}\n`;
+        else { lines.splice(index, 1); end--; }
+      }
       else {
         const original = lines[index];
         const assignment = /^(\s*[A-Za-z0-9_-]+\s*=)\s*/.exec(original)!;
@@ -130,7 +156,9 @@ export async function readSecret(input: NodeJS.ReadStream, output: NodeJS.WriteS
 export async function editConfig(args: string[], env: NodeJS.ProcessEnv): Promise<void> {
   const path = await configPath(env);
   let source: string;
-  try { source = new TextDecoder('utf-8', {fatal:true}).decode(await readFile(path)); }
+  const snapshot = captureSnapshot(path);
+  if (!snapshot.exists) throw new ConfigError('無法讀取參數檔');
+  try { source = new TextDecoder('utf-8', {fatal:true}).decode(snapshot.bytes); }
   catch { throw new ConfigError('無法讀取參數檔'); }
   const raw = parsed(source);
   if (raw.url !== undefined || raw.api_key !== undefined) throw new ConfigError('請先使用 setup 轉換舊格式');
@@ -210,7 +238,7 @@ export async function editConfig(args: string[], env: NodeJS.ProcessEnv): Promis
     try { answer = await prompt.question('確認寫入嗎？ [y/N] '); } finally { prompt.close(); }
     if (!/^y(?:es)?$/i.test(answer.trim())) throw new ConfigError('已取消，參數檔未修改');
   }
-  writePrivate(path, result);
+  writePrivate(path, result, snapshot);
   console.log('已寫入參數檔，請重新連線。');
 }
 
@@ -250,9 +278,10 @@ export function convertLegacy(text: string): string {
 export async function setupConfig(env: NodeJS.ProcessEnv): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new ConfigError('設定精靈需要互動式終端');
   const path = await configPath(env);
-  let source = '', exists = true;
-  try { source = new TextDecoder('utf-8',{fatal:true}).decode(await readFile(path)); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') exists = false; else throw new ConfigError('無法讀取參數檔'); }
+  const snapshot = captureSnapshot(path);
+  let source = '';
+  try { if (snapshot.exists) source = new TextDecoder('utf-8',{fatal:true}).decode(snapshot.bytes); }
+  catch { throw new ConfigError('無法讀取參數檔'); }
   let raw = parsed(source);
   const ask = async (label: string) => {
     const prompt = createInterface({input:process.stdin, output:process.stdout});
@@ -286,6 +315,6 @@ export async function setupConfig(env: NodeJS.ProcessEnv): Promise<void> {
   const result = old ? editLines(source, name, {url, api_key:key}) : `${source}${source && !source.endsWith('\n') ? '\n' : ''}${source ? '\n' : ''}[sites.${name}]\nurl = ${JSON.stringify(url)}\napi_key = ${JSON.stringify(key)}\n`;
   if (!same(parsed(result), expected)) throw new ConfigError('設定編輯結果不符，未修改');
   if (!/^y(?:es)?$/i.test(await ask('驗證成功，確認寫入嗎？ [y/N] '))) throw new ConfigError('已取消，參數檔未修改');
-  writePrivate(path, result, exists);
+  writePrivate(path, result, snapshot);
   console.log('已寫入參數檔；MCP 連線由 plugin 管理。');
 }

@@ -154,6 +154,18 @@ export function readHandle(handle: Handle, length: number): Buffer {
   if (!readFile(handle, buffer, length, count, null)) throw new Error(`Cannot read file (${lastError?.()})`);
   return buffer.subarray(0, count[0]);
 }
+/** Captures identity and complete bytes while a guarded regular-file handle is held. */
+export function snapshotHandle(handle: Handle): {identity: string, bytes: Buffer} {
+  verifyRegularFile(handle);
+  const details: {volume?: number, indexHigh?: number, indexLow?: number, sizeHigh?: number, sizeLow?: number} = {};
+  if (!info || !info(handle, details)) throw new Error('Cannot inspect file identity');
+  const size = Number((BigInt(details.sizeHigh!) << 32n) | BigInt(details.sizeLow!));
+  if (!Number.isSafeInteger(size) || size > 16 * 1024 * 1024) throw new Error('Config file exceeds size limit');
+  seekHandle(handle, 0);
+  const bytes = readHandle(handle, size);
+  if (bytes.length !== size) throw new Error('Cannot read complete config file');
+  return {identity: `${details.volume}:${details.indexHigh}:${details.indexLow}`, bytes};
+}
 export function writeHandle(handle: Handle, data: Buffer): void {
   if (!writeFile) throw new Error('Windows only');
   let offset = 0;
