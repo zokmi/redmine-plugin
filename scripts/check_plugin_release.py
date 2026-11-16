@@ -33,6 +33,9 @@ def check(tag: str, root: Path) -> None:
     for key in ("name", "version", "dependencies", "devDependencies", "engines"):
         if locked_root.get(key) != node_package.get(key):
             raise ValueError(f"Node lock root differs from package.json: {key}")
+    for validator in ("validate-service-config.mjs", "validate-service-config.py"):
+        if not (root / "scripts" / validator).is_file():
+            raise ValueError(f"Missing service configuration validator: {validator}")
     for name in (
         "redmine-issue-writing", "issue-code-consistency-check",
         "release-change-items", "redmine-setup",

@@ -23,22 +23,45 @@ if ($token -cnotmatch '\A[A-Za-z0-9_-]{32,}\z') { throw "$tokenName must contain
 $null = New-Item -ItemType Directory -Path $serviceRoot -Force
 try { $installLock = [IO.File]::Open((Join-Path $serviceRoot 'install.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
 catch { throw 'Another service installation is in progress.' }
-function Context-Fingerprint([string]$salt, $item) {
-    $values = [ordered]@{ token = $token; node = $node }
-    $names = @(Get-ChildItem Env: | Where-Object { ($_.Name -like 'REDMINE_*' -and $_.Name -ne $tokenName) -or $_.Name -in @('APPDATA','LOCALAPPDATA','USERPROFILE','HOME','HOMEDRIVE','HOMEPATH','XDG_CONFIG_HOME') } | ForEach-Object { $_.Name }) | Sort-Object -Unique
-    foreach ($name in $names) { $values[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+function Resolve-ServiceConfig($item, [bool]$legacyCombined = $false) {
     if ($env:REDMINE_CONFIG) {
         $config = $env:REDMINE_CONFIG.Trim()
         if ($config -eq '~' -or $config.StartsWith('~/') -or $config.StartsWith('~\')) { $config = Join-Path $env:USERPROFILE $config.Substring(1).TrimStart('\','/') }
         if (-not [IO.Path]::IsPathRooted($config)) { throw 'REDMINE_CONFIG must be absolute for service installation.' }
     } else {
-        $roaming = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $env:USERPROFILE 'AppData/Roaming' }
-        $config = Join-Path $roaming 'redmine-mcp/config.toml'
-        $legacyConfig = if ($item.engine -eq 'node') { Join-Path $serviceRoot 'redmine-mcp/config.toml' } else { Join-Path (Join-Path $serviceRoot $item.deployment) '.venv/Lib/config.toml' }
-        if (Test-Path -LiteralPath $legacyConfig -PathType Leaf) { $config = $legacyConfig }
+        if ($item.engine -eq 'node' -or $legacyCombined) {
+            $roaming = if ($env:APPDATA) { $env:APPDATA } else { Join-Path $env:USERPROFILE 'AppData/Roaming' }
+            $config = Join-Path $roaming 'redmine-mcp/config.toml'
+            $legacyConfig = if ($item.engine -eq 'node') { Join-Path $serviceRoot 'redmine-mcp/config.toml' } else { Join-Path (Join-Path $serviceRoot $item.deployment) '.venv/Lib/config.toml' }
+            if (Test-Path -LiteralPath $legacyConfig -PathType Leaf) { $config = $legacyConfig }
+        } else {
+            $dir = Join-Path $serviceRoot $item.deployment
+            $python = Join-Path $dir '.venv/Scripts/python.exe'
+            $suffix = [Guid]::NewGuid().ToString('N')
+            $probeOut = Join-Path $serviceRoot ('.config-path-' + $suffix + '.out')
+            $probeErr = Join-Path $serviceRoot ('.config-path-' + $suffix + '.err')
+            $previousPythonUtf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'Process')
+            try {
+                [Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'Process')
+                $arguments = '"{0}" --print-path' -f (Join-Path $PSScriptRoot 'validate-service-config.py')
+                $probe = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $dir -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr
+                $paths = @(Get-Content -LiteralPath $probeOut -Encoding UTF8)
+                if ($probe.ExitCode -ne 0 -or $paths.Count -ne 1 -or -not [IO.Path]::IsPathRooted($paths[0])) { throw 'Invalid configuration path.' }
+            }
+            catch { throw 'Cannot determine the Python deployment configuration path.' }
+            finally { [Environment]::SetEnvironmentVariable('PYTHONUTF8', $previousPythonUtf8, 'Process'); Remove-Item -LiteralPath $probeOut, $probeErr -Force -ErrorAction SilentlyContinue }
+            $config = $paths[0]
+        }
     }
+    return [IO.Path]::GetFullPath($config)
+}
+function Context-Fingerprint([string]$salt, $item, [bool]$identityOnly = $false, [bool]$legacyCombined = $false) {
+    $values = [ordered]@{ token = $token; node = $node }
+    $names = @(Get-ChildItem Env: | Where-Object { ($_.Name -like 'REDMINE_*' -and $_.Name -ne $tokenName) -or $_.Name -in @('APPDATA','LOCALAPPDATA','USERPROFILE','HOME','HOMEDRIVE','HOMEPATH','XDG_CONFIG_HOME') -or (-not $legacyCombined -and $_.Name -in @('PYTHONPATH','PYTHONHOME','NODE_OPTIONS','NODE_PATH','NODE_EXTRA_CA_CERTS','SSL_CERT_FILE','SSL_CERT_DIR','REQUESTS_CA_BUNDLE','CURL_CA_BUNDLE','HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','NO_PROXY')) } | ForEach-Object { $_.Name }) | Sort-Object -Unique
+    foreach ($name in $names) { $values[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+    $config = Resolve-ServiceConfig $item $legacyCombined
     $values['configPath'] = $config
-    if (Test-Path -LiteralPath $config -PathType Leaf) { $values['configBytes'] = [Convert]::ToBase64String([IO.File]::ReadAllBytes($config)) }
+    if (-not $identityOnly -and (Test-Path -LiteralPath $config -PathType Leaf)) { $values['configBytes'] = [Convert]::ToBase64String([IO.File]::ReadAllBytes($config)) }
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $bytes = [Text.Encoding]::UTF8.GetBytes($salt + ($values | ConvertTo-Json -Compress)); return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
 }
@@ -71,8 +94,15 @@ if (Test-Path -LiteralPath $statePath -PathType Leaf) {
 if ($Restart -and -not $old) { throw 'Install the local service once before using -Restart.' }
 if ($Restart -and $UseNode) { throw '-Restart uses the installed engine; omit -UseNode.' }
 if ($old -and -not $old.contextSalt -and -not $Restart) { throw 'Legacy deployment has no saved context; first restart the existing Python service to adopt its current environment.' }
+$oldConfigChanged = [bool]$old
 if ($old -and $old.contextSalt) {
-    if ($old.contextSalt -cnotmatch '\A[a-f0-9]{32}\z' -or $old.contextHash -cnotmatch '\A[a-f0-9]{64}\z' -or (Context-Fingerprint $old.contextSalt $old) -cne $old.contextHash) { throw 'Service environment or effective token changed; refusing to stop the existing deployment.' }
+    if ($old.contextSalt -cnotmatch '\A[a-f0-9]{32}\z' -or $old.contextHash -cnotmatch '\A[a-f0-9]{64}\z') { throw 'Invalid service context fingerprint.' }
+    $oldConfigChanged = (Context-Fingerprint $old.contextSalt $old $false (-not [bool]$old.envHash)) -cne $old.contextHash
+    if ($old.envHash) {
+        if ($old.envHash -cnotmatch '\A[a-f0-9]{64}\z' -or (Context-Fingerprint $old.contextSalt $old $true) -cne $old.envHash) { throw 'Service environment, configuration source or effective token changed; refusing to stop the existing deployment.' }
+        if ($oldConfigChanged -and -not $Restart) { throw 'Configuration changed since the service started; restart the existing deployment before upgrading.' }
+    } elseif ($oldConfigChanged) { throw 'Previous combined context fingerprint cannot be verified. Restore the running configuration and restart once to adopt the new format.' }
+    if (-not $old.envHash -and (Resolve-ServiceConfig $old $true) -ine (Resolve-ServiceConfig $old)) { throw 'Previous combined fingerprint used a different configuration source; verify the running configuration before migrating.' }
 }
 if ($old -and -not $old.port) { $old | Add-Member -NotePropertyName port -NotePropertyValue 18765 }
 if ($old -and $old.port -and ($Restart -or -not $PSBoundParameters.ContainsKey('Port'))) { $Port = [int]$old.port }
@@ -83,6 +113,26 @@ function Validate-Runtime($item) {
     $dir = Join-Path $serviceRoot $item.deployment
     if ($item.engine -eq 'node') { $entry = Join-Path $dir 'dist/cli.js' } else { $entry = Join-Path $dir 'local-service.mjs'; if (-not (Test-Path -LiteralPath (Join-Path $dir '.venv/Scripts/python.exe') -PathType Leaf)) { throw 'Python runtime is incomplete.' } }
     if (-not (Test-Path -LiteralPath $entry -PathType Leaf)) { throw 'Service runtime is incomplete.' }
+}
+function Validate-Configuration($item) {
+    $dir = Join-Path $serviceRoot $item.deployment
+    $previousPythonUtf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'Process')
+    $suffix = [Guid]::NewGuid().ToString('N')
+    $stdout = Join-Path $serviceRoot ('.validate-' + $suffix + '.out')
+    $stderr = Join-Path $serviceRoot ('.validate-' + $suffix + '.err')
+    try {
+        if ($item.engine -eq 'node') {
+            $program = $node
+            $arguments = '"{0}" "{1}"' -f (Join-Path $PSScriptRoot 'validate-service-config.mjs'), (Join-Path $dir 'dist/config.js')
+        } else {
+            [Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'Process')
+            $program = Join-Path $dir '.venv/Scripts/python.exe'
+            $arguments = '"{0}"' -f (Join-Path $PSScriptRoot 'validate-service-config.py')
+        }
+        $validator = Start-Process -FilePath $program -ArgumentList $arguments -WorkingDirectory $dir -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+        if ($validator.ExitCode -ne 0) { throw 'Configuration validation failed.' }
+    } catch { throw 'Configuration validation failed; existing service was not stopped.' }
+    finally { [Environment]::SetEnvironmentVariable('PYTHONUTF8', $previousPythonUtf8, 'Process'); Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue }
 }
 function Stop-Owned($item) {
     if (-not $item) { return $false }
@@ -112,7 +162,7 @@ function Start-ServiceDeployment($item) {
             if (Select-String -LiteralPath $out -SimpleMatch "Redmine MCP Node.js listening at http://127.0.0.1:$Port/mcp" -Quiet -ErrorAction SilentlyContinue) {
                 if (Test-Authorized $Port $p.Id) {
                     $salt = [Guid]::NewGuid().ToString('N')
-                    return @{ deployment=$item.deployment; engine=$item.engine; pid=$p.Id; startedAt=[string]$p.StartTime.ToUniversalTime().Ticks; image=$node; port=$Port; contextSalt=$salt; contextHash=(Context-Fingerprint $salt $item) }
+                    return @{ deployment=$item.deployment; engine=$item.engine; pid=$p.Id; startedAt=[string]$p.StartTime.ToUniversalTime().Ticks; image=$node; port=$Port; contextSalt=$salt; contextHash=(Context-Fingerprint $salt $item); envHash=(Context-Fingerprint $salt $item $true) }
                 }
             }
             Start-Sleep -Milliseconds 200
@@ -156,11 +206,24 @@ $stopped = $false; $started = $null; $persisted = $false
 try {
     $currentUserToken = Get-UserToken
     if ([string]$currentUserToken -cne [string]$originalUserToken) { throw 'User service token changed; refusing to stop the existing deployment.' }
-    if ($old -and $old.contextSalt -and (Context-Fingerprint $old.contextSalt $old) -cne $old.contextHash) { throw 'Service environment changed while preparing the deployment.' }
+    if ($old -and $old.contextSalt -and $old.envHash -and (Context-Fingerprint $old.contextSalt $old $true) -cne $old.envHash) { throw 'Service environment changed while preparing the deployment.' }
+    if ($old -and $old.contextSalt -and -not $old.envHash -and (Context-Fingerprint $old.contextSalt $old $false $true) -cne $old.contextHash) { throw 'Previous combined context fingerprint cannot be verified.' }
+    if ($old -and $old.contextSalt) {
+        $oldConfigChanged = (Context-Fingerprint $old.contextSalt $old $false (-not [bool]$old.envHash)) -cne $old.contextHash
+        if ($oldConfigChanged -and -not $Restart) { throw 'Configuration changed during staging; restart the existing deployment before upgrading.' }
+    }
     $rollbackSalt = [Guid]::NewGuid().ToString('N')
     $rollbackHash = if ($old) { Context-Fingerprint $rollbackSalt $old } else { $null }
     $candidateSalt = [Guid]::NewGuid().ToString('N')
     $candidateHash = Context-Fingerprint $candidateSalt $item
+    Validate-Configuration $item
+    if ((Context-Fingerprint $candidateSalt $item) -cne $candidateHash) { throw 'Configuration changed during validation; existing service was not stopped.' }
+    if ($old -and (Context-Fingerprint $rollbackSalt $old) -cne $rollbackHash) { throw 'Previous service configuration changed during validation; existing service was not stopped.' }
+    if ($old -and -not $Restart -and (Resolve-ServiceConfig $old) -ine (Resolve-ServiceConfig $item)) { throw 'Configuration source differs between deployments; explicit migration is required before upgrading. Existing service was not stopped.' }
+    if ($old -and $old.contextSalt) {
+        $oldConfigChanged = (Context-Fingerprint $old.contextSalt $old $false (-not [bool]$old.envHash)) -cne $old.contextHash
+        if ($oldConfigChanged -and (-not $Restart -or -not $old.envHash)) { throw 'Previous configuration changed during validation; existing service was not stopped.' }
+    }
     if ($old) { $stopped = Stop-Owned $old }
     $started = Start-ServiceDeployment $item
     if ((Context-Fingerprint $candidateSalt $item) -cne $candidateHash -or [string](Get-UserToken) -cne [string]$originalUserToken) { throw 'Service environment changed during startup.' }
@@ -170,6 +233,6 @@ try {
 } catch {
     $failure = $_
     if ($started) { $null = Stop-Owned $started }
-    if ($stopped) { try { $expectedUserToken = if ($persisted) { $token } else { $originalUserToken }; if ((Context-Fingerprint $rollbackSalt $old) -cne $rollbackHash -or [string](Get-UserToken) -cne [string]$expectedUserToken) { throw 'Prior environment changed; automatic rollback is unsafe.' }; if ($old.port) { $Port = [int]$old.port }; $restored = Start-ServiceDeployment $old; Save-State $restored; Write-Warning 'Previous deployment restored.' } catch { throw "Startup failed and rollback failed: $failure; $_" } }
+    if ($stopped) { try { if ($oldConfigChanged) { throw 'The previous running configuration was changed and is unavailable; the file was preserved and the previous service was not restored.' }; $expectedUserToken = if ($persisted) { $token } else { $originalUserToken }; if ((Context-Fingerprint $rollbackSalt $old) -cne $rollbackHash -or [string](Get-UserToken) -cne [string]$expectedUserToken) { throw 'Prior environment changed; automatic rollback is unsafe.' }; if ($old.port) { $Port = [int]$old.port }; $restored = Start-ServiceDeployment $old; Save-State $restored; Write-Warning 'Previous deployment restored.' } catch { throw "Startup failed and rollback failed: $failure; $_" } }
     throw $failure
 }
