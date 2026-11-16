@@ -3,12 +3,14 @@ import http, { type ClientRequest, type IncomingMessage } from 'node:http';
 import https from 'node:https';
 import { Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { TLSSocket } from 'node:tls';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import { validateSiteUrl, type SiteSettings } from './config.js';
 
 const { version }: { version: string } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const USER_AGENT = `redmine-mcp/${version}`;
 const CONNECT_TIMEOUT_MS = 10_000;
+const POOL_WAIT_TIMEOUT_MS = 30_000;
 const API_TIMEOUT_MS = 60_000;
 const DOWNLOAD_TIMEOUT_MS = 300_000;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -194,10 +196,12 @@ export function createTransport(site: SiteSettings): RedmineTransport {
     const stop = AbortSignal.any([timeout.signal, shutdown.signal, ...(signal ? [signal] : [])]);
     const expire = () => timeout.abort();
     const totalTimer = setTimeout(expire, timeoutMs);
-    const connectTimer = setTimeout(expire, CONNECT_TIMEOUT_MS);
+    const poolTimer = setTimeout(expire, POOL_WAIT_TIMEOUT_MS);
+    let connectTimer: NodeJS.Timeout | undefined;
     let pending: ClientRequest | undefined;
     let response: IncomingMessage | undefined;
     let removeConnectListener: (() => void) | undefined;
+    let removeAbortListener: (() => void) | undefined;
     try {
       response = await new Promise<IncomingMessage>((resolve, reject) => {
         const headers: http.OutgoingHttpHeaders = {
@@ -213,19 +217,24 @@ export function createTransport(site: SiteSettings): RedmineTransport {
         const req = request(url, { method: verb, headers, agent, signal: stop }, resolve);
         pending = req;
         req.once('error', reject);
+        // A queued ClientRequest may only emit its abort error when the agent revisits it.
+        const aborted = () => reject(stop.reason);
+        stop.addEventListener('abort', aborted, { once: true });
+        removeAbortListener = () => stop.removeEventListener('abort', aborted);
         req.once('upgrade', (_response, socket) => {
           socket.destroy();
           reject(new TransportError('server', 'Redmine 回應非預期的協定升級（HTTP 101）', 101));
         });
         req.once('socket', (socket) => {
+          clearTimeout(poolTimer);
+          // A socket handed directly to a queued request may not set reusedSocket.
+          const connecting = socket instanceof TLSSocket ? !socket.authorized : socket.connecting;
+          if (stop.aborted || !connecting) return;
+          connectTimer = setTimeout(expire, CONNECT_TIMEOUT_MS);
+          const event = secure ? 'secureConnect' : 'connect';
           const connected = () => clearTimeout(connectTimer);
-          if (req.reusedSocket || (!secure && !socket.connecting)) {
-            connected();
-          } else {
-            const event = secure ? 'secureConnect' : 'connect';
-            socket.once(event, connected);
-            removeConnectListener = () => socket.removeListener(event, connected);
-          }
+          socket.once(event, connected);
+          removeConnectListener = () => socket.removeListener(event, connected);
         });
         // Each invocation creates one request. A failed write must never be replayed.
         req.end(body);
@@ -238,9 +247,11 @@ export function createTransport(site: SiteSettings): RedmineTransport {
       if (timeout.signal.aborted) throw new TransportError('timeout', '連線 Redmine 逾時');
       throw requestFailure(error, response);
     } finally {
+      clearTimeout(poolTimer);
       clearTimeout(connectTimer);
       clearTimeout(totalTimer);
       removeConnectListener?.();
+      removeAbortListener?.();
       if (response) {
         if (!response.readableEnded) response.destroy();
       } else {
@@ -308,31 +319,48 @@ export function createTransport(site: SiteSettings): RedmineTransport {
           checkStatus(response.statusCode!, response);
           validateLength(response, maxBytes);
           let written = 0;
+          let writePending = false;
+          let pipelineSettled = false;
           const writeError = new TransportError('target_write', '無法寫入 Redmine 附件的下載目的地');
           // Pipeline owns the adapter, while the caller owns the destination's lifecycle.
           const writer = new Writable({
             write(chunk: Buffer, _encoding, done) {
               if (written + chunk.length > maxBytes) return done(tooLarge(maxBytes));
+              writePending = true;
               try {
                 target.write(chunk, (error) => {
+                  // Writable emits its error after invoking the write callback.
                   if (error) return done(writeError);
+                  writePending = false;
                   written += chunk.length;
                   done();
+                  releaseTargetListeners();
                 });
               } catch {
+                writePending = false;
                 done(writeError);
+                releaseTargetListeners();
               }
             },
           });
-          const targetFailed = () => writer.destroy(writeError);
+          function releaseTargetListeners() {
+            if (!pipelineSettled || writePending) return;
+            target.removeListener('error', targetFailed);
+            target.removeListener('close', targetFailed);
+          }
+          function targetFailed() {
+            writePending = false;
+            writer.destroy(writeError);
+            releaseTargetListeners();
+          }
           target.on('error', targetFailed);
           target.on('close', targetFailed);
           try {
             if (!target.writable) throw writeError;
             await pipeline(response, writer, { signal: stop });
           } finally {
-            target.removeListener('error', targetFailed);
-            target.removeListener('close', targetFailed);
+            pipelineSettled = true;
+            releaseTargetListeners();
           }
           return written;
         });

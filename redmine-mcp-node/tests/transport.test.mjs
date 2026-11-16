@@ -218,6 +218,54 @@ test('a failed destination callback releases the download without exposing its e
   await disconnected;
 });
 
+test('a pending destination write can fail after download cancellation', { timeout: 5000 }, async (t) => {
+  const url = await listen(t, createServer((_req, res) => res.write('abc')));
+  const transport = client(t, url);
+  const controller = new AbortController();
+  let writing;
+  const started = new Promise((resolve) => { writing = resolve; });
+  const target = new Writable({
+    write(_chunk, _encoding, done) { writing(done); },
+    destroy(error, done) { setImmediate(() => done(error)); },
+  });
+  const cancelled = assert.rejects(transport.download(`${url}/file`, target, 10, controller.signal), failure('cancelled'));
+  const finishWrite = await started;
+  controller.abort();
+  await cancelled;
+  assert.equal(target.destroyed, false);
+  const closed = new Promise((resolve) => target.once('close', resolve));
+  finishWrite(new Error('late local write failure'));
+  await closed;
+  assert.equal(target.listenerCount('error'), 0);
+});
+
+test('requests queued for a socket can wait longer than the connection timeout', { timeout: 5000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const held = [];
+  const paths = [];
+  let releaseReady;
+  const ready = new Promise((resolve) => { releaseReady = resolve; });
+  const url = await listen(t, createServer((req, res) => {
+    paths.push(req.url);
+    if (req.url === '/queued') return res.end('{"queued":true}');
+    held.push(res);
+    if (held.length === 4) releaseReady();
+  }));
+  const transport = client(t, url);
+  const active = Promise.all(Array.from({ length: 4 }, () => transport.json('GET', '/hold')));
+  await ready;
+  const expired = assert.rejects(transport.json('GET', '/expired'), failure('timeout'));
+  t.mock.timers.tick(19_000);
+  const result = assert.doesNotReject(async () => {
+    assert.deepEqual(await transport.json('GET', '/queued'), { status: 200, data: { queued: true } });
+  });
+  t.mock.timers.tick(11_001);
+  await expired;
+  for (const response of held) response.end('{}');
+  await Promise.all([active, result]);
+  assert.deepEqual(paths, ['/hold', '/hold', '/hold', '/hold', '/queued']);
+});
+
 test('HTTPS verifies the local self-signed certificate and HTTP requires site opt-in', { timeout: 5000 }, async (t) => {
   let requests = 0;
   const server = createSecureServer({
