@@ -85,18 +85,19 @@ const ntSet = nt?.func('int32 __stdcall NtSetInformationFile(void *, _Out_ RM_IO
 const readFile = kernel?.func('int __stdcall ReadFile(void *, _Out_ void *, uint32, _Out_ uint32 *, void *)');
 const writeFile = kernel?.func('int __stdcall WriteFile(void *, const void *, uint32, _Out_ uint32 *, void *)');
 const flushFile = kernel?.func('int __stdcall FlushFileBuffers(void *)');
+const setFilePointer = kernel?.func('int __stdcall SetFilePointerEx(void *, int64, _Out_ int64 *, uint32)');
 function verifyRegularFile(handle: Handle): void {
   const details: {attributes?: number, links?: number} = {};
   if (!info || !getType || !info(handle, details) || getType(handle) !== 1 || (details.attributes! & (0x10 | 0x400)) || details.links !== 1) throw new Error('Unsafe file handle');
 }
-function relative(parent: Handle, name: string, access: number, disposition: number, directory: boolean, descriptor: unknown = null): Handle {
+function relative(parent: Handle, name: string, access: number, disposition: number, directory: boolean, descriptor: unknown = null, share = 3): Handle {
   if (!ntCreate || !info || !getType || !name || name === '.' || name === '..' || /[/\\\0:]/.test(name)) throw new Error('Invalid component');
   const bytes = Buffer.from(name + '\0', 'utf16le');
   if (bytes.length > 65535) throw new Error('Component too long');
   const attrs = {Length:koffi.sizeof(ObjectAttributes), RootDirectory:parent, ObjectName:{Length:bytes.length - 2, MaximumLength:bytes.length, Buffer:bytes}, Attributes:0x40 | 0x1000, SecurityDescriptor:null, SecurityQualityOfService:null};
   attrs.SecurityDescriptor = descriptor as null;
   const output: unknown[] = [null];
-  const result = ntCreate(output, access | 0x100000 | 0x20000, attrs, {}, null, 0, 3, disposition, 0x20 | 0x200000 | 0x4000 | (directory ? 1 : 0x40), null, 0);
+  const result = ntCreate(output, access | 0x100000 | 0x20000, attrs, {}, null, 0, share, disposition, 0x20 | 0x200000 | 0x4000 | (directory ? 1 : 0x40), null, 0);
   if (result < 0 || !output[0]) throw new Error(`Cannot open entry (NTSTATUS ${result})`);
   const handle = output[0], details: {attributes?: number} = {};
   try {
@@ -110,6 +111,15 @@ function relative(parent: Handle, name: string, access: number, disposition: num
 export function openFile(parent: Handle, name: string, mode: 'open' | 'create' | 'openOrCreate' = 'open', access: 'read' | 'modify' = 'modify'): Handle {
   if (access === 'read' && mode !== 'open') throw new Error('Read-only handle must open an existing file');
   return relative(parent, name, access === 'read' ? 0x80000080 : 0xc0010080, mode === 'open' ? 1 : mode === 'create' ? 2 : 3, false);
+}
+/** Pins an existing regular file against concurrent write and replacement; caller verifies its ACL. */
+export function openGuardedFile(parent: Handle, name: string): Handle {
+  return relative(parent, name, 0x80010080, 1, false, null, 1);
+}
+export function seekHandle(handle: Handle, offset: number): void {
+  if (!setFilePointer || !Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid file offset');
+  verifyRegularFile(handle);
+  if (!setFilePointer(handle, offset, null, 0)) throw new Error(`Cannot seek file (${lastError?.()})`);
 }
 export function createDirectory(parent: Handle, name: string): Handle { return relative(parent, name, 0x80 | 0x20, 2, true); }
 export function createPrivateDirectory(parent: Handle, name: string): Handle {

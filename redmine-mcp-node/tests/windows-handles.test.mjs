@@ -134,6 +134,25 @@ test('private managed root rejects permissive ACL and protects inherited entries
   }
 });
 
+test('guarded file pins verified bytes and permits rereading before deletion', {skip: process.platform !== 'win32'}, async () => {
+  const { writeFile, readFile } = await import('node:fs/promises');
+  const { openGuardedFile, seekHandle } = await import('../dist/storage/windows-handles.js');
+  const root = await mkdtemp(join(tmpdir(), 'rm-guard-'));
+  await writeFile(join(root, 'item'), 'private fixture');
+  const parent = openDirectory(root);
+  let guard;
+  try {
+    guard = openGuardedFile(parent, 'item');
+    assert.equal(readHandle(guard, 7).toString(), 'private');
+    await assert.rejects(writeFile(join(root, 'item'), 'changed'));
+    seekHandle(guard, 0);
+    assert.equal(readHandle(guard, 30).toString(), 'private fixture');
+    deleteHandle(guard);
+    closeHandle(guard); guard = undefined;
+    await assert.rejects(readFile(join(root, 'item')));
+  } finally { if (guard) closeHandle(guard); closeHandle(parent); await rm(root, {recursive:true, force:true}); }
+});
+
 test('rejects a temporary directory with a null DACL', {skip: process.platform !== 'win32'}, async () => {
   const { default: koffi } = await import('koffi');
   const { verifyPrivateHandle } = await import('../dist/storage/windows-handles.js');
