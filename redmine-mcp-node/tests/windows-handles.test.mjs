@@ -133,3 +133,19 @@ test('private managed root rejects permissive ACL and protects inherited entries
     closeHandle(parent); await rm(root, {recursive:true, force:true});
   }
 });
+
+test('rejects a temporary directory with a null DACL', {skip: process.platform !== 'win32'}, async () => {
+  const { default: koffi } = await import('koffi');
+  const { verifyPrivateHandle } = await import('../dist/storage/windows-handles.js');
+  const kernel = koffi.load('kernel32.dll'), adv = koffi.load('advapi32.dll');
+  const open = kernel.func('void * __stdcall CreateFileW(const char16_t *, uint32, uint32, void *, uint32, uint32, void *)');
+  const close = kernel.func('int __stdcall CloseHandle(void *)');
+  const setSecurity = adv.func('uint32 __stdcall SetSecurityInfo(void *, int, uint32, void *, void *, void *, void *)');
+  const root = await mkdtemp(join(tmpdir(), 'rm-null-dacl-'));
+  const handle = open(root, 0x60000, 7, null, 3, 0x02000000, null);
+  try {
+    assert.ok(handle);
+    assert.equal(setSecurity(handle, 1, 4, null, null, null, null), 0);
+    assert.throws(() => verifyPrivateHandle(handle), /Cannot inspect security descriptor/);
+  } finally { close(handle); await rm(root, {recursive:true, force:true}); }
+});

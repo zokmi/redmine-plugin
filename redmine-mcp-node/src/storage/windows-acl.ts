@@ -28,8 +28,8 @@ export function verifyPrivateHandle(handle: unknown): void {
   const flags = [0];
   if (!volumeInfo?.(handle, null, 0, null, null, flags, null, 0) || !(flags[0] & 8)) throw new Error('Volume does not support persistent ACLs');
   const owner: unknown[] = [null], dacl: unknown[] = [null], sd: unknown[] = [null];
-  if (!securityInfo || securityInfo(handle, 1, 5, owner, null, dacl, null, sd) !== 0 || !sd[0] || !owner[0] || !dacl[0]) throw new Error('Cannot inspect security descriptor');
   try {
+    if (!securityInfo || securityInfo(handle, 1, 5, owner, null, dacl, null, sd) !== 0 || !sd[0] || !owner[0] || !dacl[0]) throw new Error('Cannot inspect security descriptor');
     const out: unknown[] = [null];
     if (!stringify?.(sd[0], 1, 5, out, null) || !out[0]) throw new Error('Cannot inspect DACL');
     try {
@@ -45,5 +45,5 @@ export function verifyPrivateHandle(handle: unknown): void {
         if (fields.length !== 6 || (fields[0] !== 'A' && fields[0] !== 'D') || (fields[0] === 'A' && !trusted.has(fields[5])) ) throw new Error('Unsafe DACL principal or ACE');
       }
     } finally { free?.(out[0]); }
-  } finally { free?.(sd[0]); }
+  } finally { if (sd[0]) free?.(sd[0]); }
 }
