@@ -12,6 +12,7 @@ void IoStatus; void FileInfo;
 const createFile = kernel?.func('void * __stdcall CreateFileW(const char16_t *, uint32, uint32, void *, uint32, uint32, void *)');
 const close = kernel?.func('int __stdcall CloseHandle(void *)');
 const info = kernel?.func('int __stdcall GetFileInformationByHandle(void *, _Out_ RM_FILE_INFO *)');
+const volumeInfo = kernel?.func('int __stdcall GetVolumeInformationByHandleW(void *, void *, uint32, void *, void *, void *, _Out_ void *, uint32)');
 const ntCreate = nt?.func('int32 __stdcall NtCreateFile(_Out_ void **, uint32, RM_OBJECT_ATTRIBUTES *, _Out_ RM_IO_STATUS *, void *, uint32, uint32, uint32, uint32, void *, uint32)');
 type Handle = unknown;
 function verified(handle: Handle): Handle {
@@ -90,14 +91,14 @@ function verifyRegularFile(handle: Handle): void {
   const details: {attributes?: number, links?: number} = {};
   if (!info || !getType || !info(handle, details) || getType(handle) !== 1 || (details.attributes! & (0x10 | 0x400)) || details.links !== 1) throw new Error('Unsafe file handle');
 }
-function relative(parent: Handle, name: string, access: number, disposition: number, directory: boolean, descriptor: unknown = null, share = 3): Handle {
+function relative(parent: Handle, name: string, access: number, disposition: number, directory: boolean, descriptor: unknown = null, share = 3, writeThrough = false): Handle {
   if (!ntCreate || !info || !getType || !name || name === '.' || name === '..' || /[/\\\0:]/.test(name)) throw new Error('Invalid component');
   const bytes = Buffer.from(name + '\0', 'utf16le');
   if (bytes.length > 65535) throw new Error('Component too long');
   const attrs = {Length:koffi.sizeof(ObjectAttributes), RootDirectory:parent, ObjectName:{Length:bytes.length - 2, MaximumLength:bytes.length, Buffer:bytes}, Attributes:0x40 | 0x1000, SecurityDescriptor:null, SecurityQualityOfService:null};
   attrs.SecurityDescriptor = descriptor as null;
   const output: unknown[] = [null];
-  const result = ntCreate(output, access | 0x100000 | 0x20000, attrs, {}, null, 0, share, disposition, 0x20 | 0x200000 | 0x4000 | (directory ? 1 : 0x40), null, 0);
+  const result = ntCreate(output, access | 0x100000 | 0x20000, attrs, {}, null, 0, share, disposition, 0x20 | 0x200000 | 0x4000 | (writeThrough ? 2 : 0) | (directory ? 1 : 0x40), null, 0);
   if (result < 0 || !output[0]) throw new Error(`Cannot open entry (NTSTATUS ${result})`);
   const handle = output[0], details: {attributes?: number} = {};
   try {
@@ -115,6 +116,19 @@ export function openFile(parent: Handle, name: string, mode: 'open' | 'create' |
 /** Pins an existing regular file against concurrent write and replacement; caller verifies its ACL. */
 export function openGuardedFile(parent: Handle, name: string): Handle {
   return relative(parent, name, 0x80010080, 1, false, null, 1);
+}
+/** Exclusive read/write/delete handle with FILE_WRITE_THROUGH for lifecycle barriers. */
+export function openDurableFile(parent: Handle, name: string, mode: 'open' | 'create'): Handle {
+  return relative(parent, name, 0xc0010080, mode === 'open' ? 1 : 2, false, null, 0, true);
+}
+export function openDurableDirectory(parent: Handle, name: string): Handle {
+  return relative(parent, name, 0xc0000080, 1, true, null, 3, true);
+}
+/** Refuse destructive lifecycle actions where NTFS metadata guarantees are unavailable. */
+export function verifyNtfs(handle: Handle): void {
+  const filesystem = Buffer.alloc(512);
+  if (!volumeInfo || !volumeInfo(handle, null, 0, null, null, null, filesystem, filesystem.length / 2)) throw new Error('Cannot determine filesystem');
+  if (filesystem.toString('utf16le').split('\0', 1)[0] !== 'NTFS') throw new Error('Lifecycle requires NTFS');
 }
 export function seekHandle(handle: Handle, offset: number): void {
   if (!setFilePointer || !Number.isSafeInteger(offset) || offset < 0) throw new Error('Invalid file offset');

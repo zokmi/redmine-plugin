@@ -31,10 +31,12 @@ function bounded(h: H, max: number): Buffer {
   const chunks: Buffer[] = []; let size = 0;
   while (true) { const b = readHandle(h, Math.min(65536, max - size + 1)); size += b.length; if (size > max) throw new Error('File exceeds size limit'); if (!b.length) return Buffer.concat(chunks); chunks.push(b); }
 }
-function jsonWrite(parent: H, name: string, record: ItemRecord, replace: boolean): void {
-  const h = openFile(parent, `.record-${randomBytes(16).toString('hex')}.tmp`, 'create');
-  try { verifyPrivateHandle(h); writeHandle(h, Buffer.from(JSON.stringify(record), 'utf8')); flushHandle(h); renameHandle(h, parent, name, replace); }
-  catch (e) { try { deleteHandle(h); } catch {} throw e; } finally { closeHandle(h); }
+function jsonWrite(parent: H, name: string, record: ItemRecord, replace: boolean, durable = false): void {
+  const tempName = `.record-${randomBytes(16).toString('hex')}.tmp`;
+  const h = durable ? openDurableFile(parent, tempName, 'create') : openFile(parent, tempName, 'create');
+  let renamed = false;
+  try { verifyPrivateHandle(h); writeHandle(h, Buffer.from(JSON.stringify(record), 'utf8')); flushHandle(h); renameHandle(h, parent, name, replace); renamed = true; if (durable) flushHandle(h); }
+  catch (e) { if (!renamed) { try { deleteHandle(h); } catch {} } throw e; } finally { closeHandle(h); }
 }
 export function createWindowsAttachmentStore(options: {root: string; clock?: () => Date}): AttachmentStore & { sweep(now?: Date, signal?: AbortSignal): Promise<void> } {
   if (process.platform !== 'win32' || !path.win32.isAbsolute(options.root)) throw new Error('Windows absolute root required');
@@ -107,11 +109,19 @@ import { pipeline } from 'node:stream/promises';
 import { ZipFile as ZipWriter } from 'yazl';
 import { RandomAccessReader, fromRandomAccessReaderPromise } from 'yauzl';
 import { createRequire } from 'node:module';
-import { openGuardedFile, seekHandle } from './windows-handles.js';
+import { openGuardedFile, openDurableFile, openDurableDirectory, verifyNtfs, seekHandle } from './windows-handles.js';
 const crc32 = createRequire(import.meta.url)('buffer-crc32') as { unsigned(data: Buffer, previous: number): number };
 
 function guarded(parent: H, name: string, handles: H[]): H {
   const h = openGuardedFile(parent, name); handles.push(h); verifyPrivateHandle(h); return h;
+}
+function durable(parent: H, name: string, mode: 'open' | 'create', handles: H[]): H {
+  const h = openDurableFile(parent, name, mode); handles.push(h); verifyPrivateHandle(h); return h;
+}
+function ceilTimestamp(value: string): number {
+  const milliseconds = Date.parse(value);
+  const fraction = /\.(\d+)\+00:00$/.exec(value)?.[1] ?? '';
+  return milliseconds + (/[1-9]/.test(fraction.slice(3)) ? 1 : 0);
 }
 function streamRange(h: H, start: number, end: number): Readable {
   let position = start;
@@ -153,7 +163,7 @@ async function sweepWindows(rootPath: string, openRoot: (handles: H[]) => H, now
   if (!Number.isFinite(now.getTime())) throw new Error('Invalid sweep time');
   const outer: H[] = [];
   try {
-    const root = openRoot(outer), global = tryLock(root, '.sweep.lock');
+    const root = openRoot(outer); verifyNtfs(root); const global = tryLock(root, '.sweep.lock');
     if (!global) return; outer.push(global); verifyPrivateHandle(global);
     for (const key of await readdir(rootPath)) {
       if (signal?.aborted) return;
@@ -172,8 +182,8 @@ async function sweepWindows(rootPath: string, openRoot: (handles: H[]) => H, now
             closeHandle(metadata); handles.splice(handles.indexOf(metadata), 1);
             if (rec.site_key !== key || rec.item_id !== id) throw new Error('Record identity mismatch');
             filename(rec.filename);
-            if ([rec.created_at, rec.last_used_at, rec.archived_at ?? rec.created_at].some(t => Date.parse(t) > now.getTime())) continue;
-            if (rec.state === 'active' && now.getTime() - Date.parse(rec.last_used_at) < 604800000) continue;
+            if ([rec.created_at, rec.last_used_at, rec.archived_at ?? rec.created_at].some(t => ceilTimestamp(t) > now.getTime())) continue;
+            if (rec.state === 'active' && now.getTime() - ceilTimestamp(rec.last_used_at) < 604800000) continue;
             const archives = child(site, 'archives', rec.state === 'active', handles), zipName = `${id}.zip`;
             if (rec.state !== 'archived') {
               let source: H | undefined;
@@ -183,30 +193,50 @@ async function sweepWindows(rootPath: string, openRoot: (handles: H[]) => H, now
               if (rec.state === 'active') {
                 if (!source) throw new Error('Original missing');
                 rec = {...rec, ...fingerprint(source)};
-                try { archive = guarded(archives, zipName, handles); }
+                try { archive = durable(archives, zipName, 'open', handles); }
                 catch (e) { if (!(e instanceof Error) || !e.message.includes('NTSTATUS -1073741772')) throw e; }
                 if (!archive) {
-                  const temp = file(archives, `.${id}.${randomUUID().replaceAll('-', '')}.tmp`, 'create', 'modify', handles);
-                  try { await writeZip(source, temp, rec); verifySource(source, rec); renameHandle(temp, archives, zipName); }
+                  const temp = durable(archives, `.${id}.${randomUUID().replaceAll('-', '')}.tmp`, 'create', handles);
+                  try { await writeZip(source, temp, rec); verifySource(source, rec); renameHandle(temp, archives, zipName); flushHandle(temp); }
                   catch (e) { try { deleteHandle(temp); } catch {} throw e; }
                   closeHandle(temp); handles.splice(handles.indexOf(temp), 1);
-                  archive = guarded(archives, zipName, handles);
+                  archive = durable(archives, zipName, 'open', handles);
                 }
                 await verifyZip(archive, rec); verifySource(source, rec);
                 rec = {...rec, state:'archive_published', archived_at:timestamp(() => now)};
-                jsonWrite(records, name, rec, true);
+                jsonWrite(records, name, rec, true, true);
               }
-              archive ??= guarded(archives, zipName, handles); await verifyZip(archive, rec);
+              archive ??= durable(archives, zipName, 'open', handles); await verifyZip(archive, rec);
+              const barrierRecord = durable(records, name, 'open', handles);
+              const current = parseItemRecord(JSON.parse(bounded(barrierRecord, 65536).toString('utf8')));
+              if (JSON.stringify(current) !== JSON.stringify(rec)) throw new Error('Record changed');
+              flushHandle(archive); flushHandle(barrierRecord);
+              const rootParentPath = path.win32.dirname(rootPath), rootName = path.win32.basename(rootPath);
+              if (rootParentPath === rootPath) throw new Error('Cannot synchronize root directory');
+              const rootParent = openDirectory(rootParentPath); handles.push(rootParent);
+              const rootBarrier = openDurableDirectory(rootParent, rootName); handles.push(rootBarrier); verifyPrivateHandle(rootBarrier, true); flushHandle(rootBarrier);
+              for (const [parent, directory] of [[root, key], [site, 'archives'], [site, 'records']] as [H, string][]) {
+                const h = openDurableDirectory(parent, directory); handles.push(h); verifyPrivateHandle(h); flushHandle(h);
+              }
+              closeHandle(barrierRecord); handles.splice(handles.indexOf(barrierRecord), 1);
               if (source) { verifySource(source, rec); await verifyZip(archive, rec); deleteHandle(source); }
-              rec = {...rec, state:'archived'}; jsonWrite(records, name, rec, true);
+              rec = {...rec, state:'archived'}; jsonWrite(records, name, rec, true, true);
               continue;
             }
-            if (rec.archived_at && now.getTime() - Date.parse(rec.archived_at) >= 2592000000) {
-              const archive = guarded(archives, zipName, handles); await verifyZip(archive, rec);
-              const recordHandle = guarded(records, name, handles);
+            if (rec.archived_at && now.getTime() - ceilTimestamp(rec.archived_at) >= 2592000000) {
+              const archiveDirectory = openDurableDirectory(site, 'archives'); handles.push(archiveDirectory); verifyPrivateHandle(archiveDirectory);
+              const recordsDirectory = openDurableDirectory(site, 'records'); handles.push(recordsDirectory); verifyPrivateHandle(recordsDirectory);
+              flushHandle(archiveDirectory); flushHandle(recordsDirectory);
+              let archive: H | undefined;
+              try { archive = durable(archives, zipName, 'open', handles); }
+              catch (e) { if (!(e instanceof Error) || e.message !== 'Cannot open entry (NTSTATUS -1073741772)') throw e; }
+              if (archive) await verifyZip(archive, rec);
+              const recordHandle = durable(records, name, 'open', handles);
               const current = parseItemRecord(JSON.parse(bounded(recordHandle, 65536).toString('utf8')));
               if (JSON.stringify(current) !== JSON.stringify(rec)) throw new Error('Record changed');
-              deleteHandle(archive); deleteHandle(recordHandle);
+              if (archive) { deleteHandle(archive); closeHandle(archive); handles.splice(handles.indexOf(archive), 1); }
+              flushHandle(archiveDirectory); deleteHandle(recordHandle);
+              closeHandle(recordHandle); handles.splice(handles.indexOf(recordHandle), 1); flushHandle(recordsDirectory);
             }
           } catch { /* Retain uncertain items. */ } finally { closeAll(handles); }
         }

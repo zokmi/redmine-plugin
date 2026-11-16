@@ -193,3 +193,47 @@ test('sweep respects locks and the seven-day idle threshold', {skip:process.plat
     await store.sweep(); assert.equal(JSON.parse(await readFile(recordPath)).state,'archived');
   } finally { await rm(base,{recursive:true,force:true}); }
 });
+
+test('sweep keeps original when a post-rename barrier fails', {skip:process.platform !== 'win32'}, async () => {
+  const {spawnSync} = await import('node:child_process');
+  for (const mode of ['zip','record','recovery','directory','volume']) {
+    const result = spawnSync(process.execPath, ['--experimental-test-module-mocks','test-support/sweep-barrier-fixture.mjs',mode], {encoding:'utf8'});
+    assert.equal(result.status, 0, result.stderr);
+  }
+});
+
+test('sweep uses microsecond timestamps without premature archive or expiry', {skip:process.platform !== 'win32'}, async () => {
+  const {writeFile} = await import('node:fs/promises'); const {createWindowsAttachmentStore} = await import('../dist/storage/windows-store.js');
+  const base = await mkdtemp(join(tmpdir(),'rm-micro-')); const p = openDirectory(base), r = createPrivateDirectory(p,'cache'); closeHandle(r); closeHandle(p);
+  try {
+    let now = new Date('2026-01-01T00:00:00Z'); const store = createWindowsAttachmentStore({root:join(base,'cache'),clock:() => now});
+    const stage = await store.stageDownload('https://example.com','x'); stage.writer.end('data'); await once(stage.writer,'finish'); const original = await store.publish(stage);
+    const id = basename(dirname(original)), site = dirname(dirname(dirname(original))), recordPath = join(site,'records',`${id}.json`), zipPath = join(site,'archives',`${id}.zip`);
+    let rec = JSON.parse(await readFile(recordPath)); rec.last_used_at = '2026-01-01T00:00:00.000001+00:00'; await writeFile(recordPath,JSON.stringify(rec));
+    now = new Date('2026-01-08T00:00:00Z'); await store.sweep(); assert.equal(JSON.parse(await readFile(recordPath)).state,'active');
+    now = new Date('2026-01-08T00:00:00.001Z'); await store.sweep(); rec = JSON.parse(await readFile(recordPath)); assert.equal(rec.state,'archived');
+    rec.state = 'archive_published'; rec.archived_at = '2026-01-08T00:00:00.002001+00:00'; await writeFile(recordPath,JSON.stringify(rec)); await writeFile(original,'data');
+    now = new Date('2026-01-08T00:00:00.002Z'); await store.sweep(); assert.equal((await readFile(original)).toString(),'data');
+    now = new Date('2026-01-08T00:00:00.003Z'); await store.sweep(); await assert.rejects(readFile(original),{code:'ENOENT'}); rec = JSON.parse(await readFile(recordPath));
+    rec.archived_at = '2026-01-08T00:00:00.001001+00:00'; await writeFile(recordPath,JSON.stringify(rec));
+    now = new Date('2026-02-07T00:00:00.001Z'); await store.sweep(); assert.equal(JSON.parse(await readFile(recordPath)).state,'archived'); assert.ok(await readFile(zipPath));
+    now = new Date('2026-02-07T00:00:00.002Z'); await store.sweep(); await assert.rejects(readFile(recordPath),{code:'ENOENT'});
+  } finally { await rm(base,{recursive:true,force:true}); }
+});
+
+test('sweep finishes expiry interrupted after removing archive', {skip:process.platform !== 'win32'}, async () => {
+  const {createWindowsAttachmentStore} = await import('../dist/storage/windows-store.js'); const base = await mkdtemp(join(tmpdir(),'rm-expiry-')); const p = openDirectory(base), r = createPrivateDirectory(p,'cache'); closeHandle(r); closeHandle(p);
+  try {
+    let now = new Date('2026-01-01T00:00:00Z'); const store = createWindowsAttachmentStore({root:join(base,'cache'),clock:() => now});
+    const stage = await store.stageDownload('https://example.com','x'); stage.writer.end('data'); await once(stage.writer,'finish'); const original = await store.publish(stage);
+    const id = basename(dirname(original)), site = dirname(dirname(dirname(original))), recordPath = join(site,'records',`${id}.json`), zipPath = join(site,'archives',`${id}.zip`);
+    now = new Date('2026-01-09T00:00:00Z'); await store.sweep(); await rm(zipPath);
+    now = new Date('2026-02-08T00:00:00Z'); await store.sweep(); await assert.rejects(readFile(recordPath),{code:'ENOENT'});
+  } finally { await rm(base,{recursive:true,force:true}); }
+});
+
+test('sweep resumes after injected interruption during expiry', {skip:process.platform !== 'win32'}, async () => {
+  const {spawnSync} = await import('node:child_process');
+  const result = spawnSync(process.execPath,['--experimental-test-module-mocks','test-support/sweep-expiry-fixture.mjs'],{encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);
+});
