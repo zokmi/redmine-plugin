@@ -59,6 +59,37 @@ function inlineComment(statement: string): string | null {
   }
   return null;
 }
+function collectStatementComments(text: string): string[] {
+  const comments: string[] = [];
+  let quote: '' | 'basic' | 'literal' | 'multi-basic' | 'multi-literal' = '';
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (!quote) {
+      if (char === '#') {
+        let end = text.indexOf('\n', i);
+        if (end < 0) end = text.length;
+        comments.push(text.slice(i, end).replace(/\r$/, '') + '\n'); i = end; continue;
+      }
+      if (char === '"' || char === "'") {
+        const triple = text.slice(i, i + 3) === char.repeat(3);
+        quote = char === '"' ? (triple ? 'multi-basic' : 'basic') : (triple ? 'multi-literal' : 'literal');
+        if (triple) i += 2;
+      }
+    } else if (quote === 'basic' || quote === 'multi-basic') {
+      if (char === '\\') { i++; continue; }
+      if (quote === 'basic' && char === '"') quote = '';
+      else if (quote === 'multi-basic' && text.slice(i, i + 3) === '"""') {
+        while (text[i + 1] === '"') i++;
+        quote = '';
+      }
+    } else if (quote === 'literal' && char === "'") quote = '';
+    else if (quote === 'multi-literal' && text.slice(i, i + 3) === "'''") {
+      while (text[i + 1] === "'") i++;
+      quote = '';
+    }
+  }
+  return comments;
+}
 function editLines(text: string, section: string | null, changes: Record<string, string | number | null>, remove = false): string {
   const lines = text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
   function statements(): {start: number, end: number, header: boolean}[] {
@@ -92,8 +123,7 @@ function editLines(text: string, section: string | null, changes: Record<string,
       const span = spans.find(item => item.start <= i && i < item.end);
       if (!span && lines[i].trimStart().startsWith('#')) comments.push(lines[i]);
       else if (span && span.start === i) {
-        const comment = inlineComment(lines.slice(span.start, span.end).join(''));
-        if (comment) comments.push(`${comment}\n`);
+        comments.push(...collectStatementComments(lines.slice(span.start, span.end).join('')));
       }
     }
     lines.splice(start, end - start, ...comments); return lines.join('');

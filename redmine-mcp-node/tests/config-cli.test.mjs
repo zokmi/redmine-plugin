@@ -236,3 +236,24 @@ test('config writer refuses a cooperating writer holding the same lock', {skip:p
     assert.throws(() => writePrivate(file,'new',snapshot),/另一個程序/); assert.equal(await readFile(file,'utf8'),'old');
   } finally { if(lock) closeHandle(lock); if(parent) closeHandle(parent); await rm(dir,{recursive:true,force:true}); }
 });
+
+test('site removal keeps array comments without turning string hashes into comments', async () => {
+  const {readFile} = await import('node:fs/promises'); const dir=await mkdtemp(join(tmpdir(),'redmine-cli-'));
+  try {
+    const file=join(dir,'config.toml'); await writeFile(file,'[sites.main]\nurl = "https://example.test"\napi_key = "fixture-key"\nunknown = [\n  "# not a comment", # first array note\n  "literal \\\" # still string",\n  "ok", # second array note\n]\n[sites.other]\nurl = "https://other.test"\napi_key = "other-key"\n');
+    const result=spawnSync(process.execPath,['dist/cli.js','config','remove-site','main','--yes'],{env:{...process.env,REDMINE_CONFIG:file},encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr); const text=await readFile(file,'utf8'); assert.match(text,/# first array note/); assert.match(text,/# second array note/); assert.doesNotMatch(text,/# not a comment|# still string/);
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});
+
+test('site removal recognizes comments after all TOML string forms', async () => {
+  const {readFile} = await import('node:fs/promises'); const dir=await mkdtemp(join(tmpdir(),'redmine-cli-'));
+  try {
+    const file=join(dir,'config.toml');
+    const source = `[sites.main]\nurl = "https://example.test"\napi_key = "fixture-key"\nunknown = [\n  """x # string\nend"""", # after basic\n  '''x # string\nend'''', # after literal\n  '# literal hash', # after single\n]\n[sites.other]\nurl = "https://other.test"\napi_key = "other-key"\n`;
+    await writeFile(file,source);
+    const result=spawnSync(process.execPath,['dist/cli.js','config','remove-site','main','--yes'],{env:{...process.env,REDMINE_CONFIG:file},encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr); const text=await readFile(file,'utf8');
+    assert.match(text,/# after basic/); assert.match(text,/# after literal/); assert.match(text,/# after single/); assert.doesNotMatch(text,/# string|# literal hash/);
+  } finally { await rm(dir,{recursive:true,force:true}); }
+});
