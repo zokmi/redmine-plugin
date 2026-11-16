@@ -57,7 +57,7 @@ uvx --python 3.13 --from "<已安裝 plugin 根目錄>/redmine-mcp" redmine-mcp 
 
 ## Plugin 啟動疑難排解
 
-Windows 請從 PowerShell 執行已安裝 plugin 內的 `scripts/install-local-service.ps1`。腳本會無視窗啟動 Node.js 共用服務並顯示 PID 和日誌位置。首次安裝、更新、重開機或服務退出後，依 [共用服務指引](../README.md#啟動本機共用服務) 操作。
+Windows 請從 PowerShell 執行已安裝 plugin 內的 `scripts/install-local-service.ps1`。腳本會無視窗啟動 Node.js 共用服務並顯示 PID 和日誌位置。Python worker 退出時會自動重啟。若 Node.js 已退出或需要重啟，執行同一腳本並加上 `-Restart`。安裝與更新步驟請見 [共用服務指引](../README.md#啟動本機共用服務)。
 
 服務與兩個客戶端需取得同一份 `REDMINE_MCP_LOCAL_TOKEN`。服務固定監聽本機 loopback，兩個 plugin 的預設連接埠為 `18765`。前景診斷命令如下：
 

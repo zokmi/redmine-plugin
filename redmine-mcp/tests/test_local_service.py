@@ -4,6 +4,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -11,6 +12,75 @@ import httpx2
 import pytest
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+
+
+def test_node_recovers_after_worker_crash(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is unavailable")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    package = tmp_path / "redmine_mcp"
+    package.mkdir()
+    (package / "__init__.py").touch()
+    (package / "local_worker.py").write_text(
+        """
+import os
+import sys
+from threading import Thread
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+def watch_parent():
+    os.read(sys.stdin.fileno(), 1)
+    os._exit(0)
+
+Thread(target=watch_parent, daemon=True).start()
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.headers.get("X-Crash"):
+            os._exit(17)
+        self.send_response(200)
+        self.end_headers()
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+print(server.server_port, flush=True)
+server.serve_forever()
+""",
+        encoding="utf-8",
+    )
+    token = "x" * 32
+    script = Path(__file__).resolve().parents[2] / "scripts" / "local-service.mjs"
+    with subprocess.Popen(
+        [node, str(script), sys.executable, str(port)],
+        cwd=tmp_path,
+        env={**os.environ, "REDMINE_MCP_LOCAL_TOKEN": token, "PYTHONPATH": str(tmp_path)},
+    ) as service, httpx.Client(
+        base_url=f"http://127.0.0.1:{port}",
+        headers={"Authorization": f"Bearer {token}"},
+        trust_env=False,
+        timeout=1,
+    ) as http:
+        try:
+            def wait_for_worker() -> None:
+                for _ in range(100):
+                    assert service.poll() is None, "Node.js exited with its worker"
+                    try:
+                        if http.get("/mcp").status_code == 200:
+                            return
+                    except httpx.TransportError:
+                        pass
+                    time.sleep(0.1)
+                pytest.fail("Worker did not become ready")
+
+            wait_for_worker()
+            assert http.get("/mcp", headers={"X-Crash": "1"}).status_code == 502
+            wait_for_worker()
+        finally:
+            # The fixture worker exits when its parent closes stdin.
+            service.terminate()
 
 
 @pytest.mark.parametrize("runtime", ["python", "node"])

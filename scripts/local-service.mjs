@@ -21,6 +21,7 @@ const workerToken = randomBytes(32).toString('hex');
 let worker;
 let workerPort;
 let startupTimeout;
+let restartTimeout;
 let stopping = false;
 
 function end(response, status, headers) {
@@ -80,6 +81,7 @@ function stop(message) {
   if (stopping) return;
   stopping = true;
   clearTimeout(startupTimeout);
+  clearTimeout(restartTimeout);
   if (message) {
     console.error(message);
     process.exitCode = 1;
@@ -92,24 +94,42 @@ function stop(message) {
 process.on('SIGINT', () => stop());
 process.on('SIGTERM', () => stop());
 server.on('error', error => stop(`無法監聽 ${host}:${port} (${error.code})`));
-server.listen(port, host, () => {
+function startWorker() {
   const env = { ...process.env, PYTHONUTF8: '1', REDMINE_MCP_WORKER_TOKEN: workerToken };
   delete env.REDMINE_MCP_LOCAL_TOKEN;
   worker = spawn(python, ['-u', '-m', 'redmine_mcp.local_worker'], {
     env, windowsHide: true, stdio: ['pipe', 'pipe', 'inherit'],
   });
-  worker.on('error', error => stop(`Redmine worker 啟動失敗 (${error.code})`));
-  worker.on('exit', (code, signal) => stop(`Redmine worker 已結束 (${code ?? signal})`));
-  startupTimeout = setTimeout(() => stop('Redmine worker 啟動逾時'), 25_000);
+  worker.on('error', error => console.error(`Redmine worker 錯誤 (${error.code})`));
+  worker.on('exit', () => {
+    workerPort = undefined;
+    clearTimeout(startupTimeout);
+  });
+  worker.on('close', (code, signal) => {
+    workerPort = undefined;
+    clearTimeout(startupTimeout);
+    worker = undefined;
+    if (stopping) return;
+    console.error(`Redmine worker 已結束 (${code ?? signal})，2 秒後重啟`);
+    restartTimeout = setTimeout(startWorker, 2_000);
+  });
+  const child = worker;
+  function abortStartup(message) {
+    console.error(message);
+    child.kill();
+  }
+  startupTimeout = setTimeout(() => abortStartup('Redmine worker 啟動逾時'), 90_000);
   const lines = createInterface({ input: worker.stdout });
   lines.once('line', line => {
     const readyPort = Number(line);
     if (!/^\d+$/.test(line) || readyPort < 1 || readyPort > 65535) {
-      stop('Redmine worker 回傳無效連接埠');
+      abortStartup('Redmine worker 回傳無效連接埠');
       return;
     }
     workerPort = readyPort;
     clearTimeout(startupTimeout);
     console.log(`Redmine MCP Node.js listening at http://${host}:${port}/mcp`);
   });
-});
+}
+
+server.listen(port, host, startWorker);
