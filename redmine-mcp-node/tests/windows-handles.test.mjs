@@ -114,3 +114,22 @@ test('rejects hard-linked files and rechecks an already-open handle', {skip: pro
     assert.equal(await readFile(join(root, 'second'), 'utf8'), 'safe');
   } finally { closeHandle(parent); await rm(root, {recursive:true, force:true}); }
 });
+
+
+test('private managed root rejects permissive ACL and protects inherited entries', {skip: process.platform !== 'win32'}, async () => {
+  const { createPrivateDirectory, verifyPrivateHandle } = await import('../dist/storage/windows-handles.js');
+  const root = await mkdtemp(join(tmpdir(), 'rm-acl-'));
+  const parent = openDirectory(root);
+  let managed, child, file, permissive;
+  try {
+    permissive = createDirectory(parent, 'permissive');
+    assert.throws(() => verifyPrivateHandle(permissive), /Unsafe owner or DACL|Unsafe DACL principal/);
+    managed = createPrivateDirectory(parent, 'managed');
+    verifyPrivateHandle(managed);
+    child = createDirectory(managed, 'child'); verifyPrivateHandle(child);
+    file = openFile(child, 'file', 'create'); verifyPrivateHandle(file);
+  } finally {
+    if (file) closeHandle(file); if (child) closeHandle(child); if (managed) closeHandle(managed); if (permissive) closeHandle(permissive);
+    closeHandle(parent); await rm(root, {recursive:true, force:true});
+  }
+});

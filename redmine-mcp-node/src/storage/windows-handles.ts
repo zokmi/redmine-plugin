@@ -1,5 +1,7 @@
 import koffi from 'koffi';
 import path from 'node:path';
+import { privateDescriptor, verifyPrivateHandle } from './windows-acl.js';
+export { verifyPrivateHandle } from './windows-acl.js';
 const kernel = process.platform === 'win32' ? koffi.load('kernel32.dll') : null;
 const nt = process.platform === 'win32' ? koffi.load('ntdll.dll') : null;
 const UnicodeString = koffi.struct('RM_UNICODE_STRING', { Length: 'uint16', MaximumLength: 'uint16', Buffer: 'void *' });
@@ -36,7 +38,7 @@ export function openChildDirectory(parent: Handle, name: string): Handle {
   const unicode = {Length: bytes.length - 2, MaximumLength: bytes.length, Buffer: bytes};
   const attrs = {Length: koffi.sizeof(ObjectAttributes), RootDirectory: parent, ObjectName: unicode, Attributes: 0x40 | 0x1000, SecurityDescriptor: null, SecurityQualityOfService: null};
   const output: unknown[] = [null]; const io = {};
-  const result = ntCreate(output, 0x80 | 0x20 | 0x100000, attrs, io, null, 0, 3, 1, 0x20 | 0x200000 | 0x4000 | 1, null, 0);
+  const result = ntCreate(output, 0x80 | 0x20 | 0x100000 | 0x20000, attrs, io, null, 0, 3, 1, 0x20 | 0x200000 | 0x4000 | 1, null, 0);
   if (result < 0 || !output[0]) throw new Error(`Cannot open directory (NTSTATUS ${result})`);
   return verified(output[0]);
 }
@@ -66,7 +68,7 @@ export function tryLock(parent: Handle, name: string): Handle | null {
   if (bytes.length > 65535) throw new Error('Lock name too long');
   const attrs = {Length:koffi.sizeof(ObjectAttributes), RootDirectory:parent, ObjectName:{Length:bytes.length - 2, MaximumLength:bytes.length, Buffer:bytes}, Attributes:0x40 | 0x1000, SecurityDescriptor:null, SecurityQualityOfService:null};
   const output: unknown[] = [null]; const io = {};
-  const result = ntCreate(output, 0xc0100000, attrs, io, null, 0, 3, 3, 0x20 | 0x200000 | 0x4000 | 0x40, null, 0);
+  const result = ntCreate(output, 0xc0120000, attrs, io, null, 0, 3, 3, 0x20 | 0x200000 | 0x4000 | 0x40, null, 0);
   if (result < 0 || !output[0]) throw new Error(`Cannot open lock (NTSTATUS ${result})`);
   const handle = output[0];
   try { verifyRegularFile(handle); } catch (error) { closeHandle(handle); throw error; }
@@ -87,13 +89,14 @@ function verifyRegularFile(handle: Handle): void {
   const details: {attributes?: number, links?: number} = {};
   if (!info || !getType || !info(handle, details) || getType(handle) !== 1 || (details.attributes! & (0x10 | 0x400)) || details.links !== 1) throw new Error('Unsafe file handle');
 }
-function relative(parent: Handle, name: string, access: number, disposition: number, directory: boolean): Handle {
+function relative(parent: Handle, name: string, access: number, disposition: number, directory: boolean, descriptor: unknown = null): Handle {
   if (!ntCreate || !info || !getType || !name || name === '.' || name === '..' || /[/\\\0:]/.test(name)) throw new Error('Invalid component');
   const bytes = Buffer.from(name + '\0', 'utf16le');
   if (bytes.length > 65535) throw new Error('Component too long');
   const attrs = {Length:koffi.sizeof(ObjectAttributes), RootDirectory:parent, ObjectName:{Length:bytes.length - 2, MaximumLength:bytes.length, Buffer:bytes}, Attributes:0x40 | 0x1000, SecurityDescriptor:null, SecurityQualityOfService:null};
+  attrs.SecurityDescriptor = descriptor as null;
   const output: unknown[] = [null];
-  const result = ntCreate(output, access | 0x100000, attrs, {}, null, 0, 3, disposition, 0x20 | 0x200000 | 0x4000 | (directory ? 1 : 0x40), null, 0);
+  const result = ntCreate(output, access | 0x100000 | 0x20000, attrs, {}, null, 0, 3, disposition, 0x20 | 0x200000 | 0x4000 | (directory ? 1 : 0x40), null, 0);
   if (result < 0 || !output[0]) throw new Error(`Cannot open entry (NTSTATUS ${result})`);
   const handle = output[0], details: {attributes?: number} = {};
   try {
@@ -109,6 +112,10 @@ export function openFile(parent: Handle, name: string, mode: 'open' | 'create' |
   return relative(parent, name, access === 'read' ? 0x80000080 : 0xc0010080, mode === 'open' ? 1 : mode === 'create' ? 2 : 3, false);
 }
 export function createDirectory(parent: Handle, name: string): Handle { return relative(parent, name, 0x80 | 0x20, 2, true); }
+export function createPrivateDirectory(parent: Handle, name: string): Handle {
+  const sd = privateDescriptor();
+  try { const handle = relative(parent, name, 0x80 | 0x20, 2, true, sd.descriptor); try { verifyPrivateHandle(handle); return handle; } catch (error) { closeHandle(handle); throw error; } } finally { sd.release(); }
+}
 export function readHandle(handle: Handle, length: number): Buffer {
   if (!readFile || !Number.isSafeInteger(length) || length < 0 || length > 0x7fffffff) throw new Error('Invalid read length');
   verifyRegularFile(handle);
