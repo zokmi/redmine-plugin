@@ -11,6 +11,7 @@
     "test": "npm run build && node --test"
   },
   "dependencies": {
+    "@ltd/j-toml": "1.38.0",
     "@modelcontextprotocol/sdk": "1.32.2"
   },
   "devDependencies": {
