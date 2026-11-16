@@ -1,5 +1,6 @@
 import { basename, extname } from 'node:path';
 import { createRequire } from 'node:module';
+import { finished } from 'node:stream/promises';
 const lookupMime = (createRequire(import.meta.url)('mime-types') as { lookup(name: string): string | false }).lookup;
 import { formatAttachment, isObject, object, records, neutralizeUntrustedMarkers } from '../formatting.js';
 import { fanOut, requestObject, type SiteRegistry } from '../sites.js';
@@ -71,6 +72,10 @@ export function registerAttachments(tools: ToolRegistry, sites: SiteRegistry, st
     try {
       signal.throwIfAborted();
       const bytes = await target.transport.download(source.href, staged.writer, target.settings.maxAttachmentBytes, signal);
+      signal.throwIfAborted();
+      const completion = finished(staged.writer, { cleanup: true, signal });
+      staged.writer.end();
+      await completion;
       signal.throwIfAborted();
       const path = await store.publish(staged);
       return { site: name, attachment_id, filename: neutralizeUntrustedMarkers(basename(path)), path, bytes, ...(Object.keys(errors).length ? { site_errors: errors } : {}) };

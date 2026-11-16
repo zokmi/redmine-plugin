@@ -4,6 +4,38 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../dist/server.js';
 
+test('download publishes actual HTTP bytes through the Windows store', { skip: process.platform !== 'win32', timeout: 10000 }, async (t) => {
+  const { createServer: httpServer } = await import('node:http');
+  const { once } = await import('node:events');
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { openDirectory, createPrivateDirectory, closeHandle } = await import('../dist/storage/windows-handles.js');
+  const { createWindowsAttachmentStore } = await import('../dist/storage/windows-store.js');
+  const bytes = Buffer.from('actual attachment bytes\x00\xff', 'latin1');
+  const http = httpServer((req, res) => {
+    if (req.url === '/attachments/42.json') res.end(JSON.stringify({ attachment: { filename: 'sample.bin', content_url: `http://127.0.0.1:${http.address().port}/file` } }));
+    else if (req.url === '/file') res.end(bytes);
+    else res.writeHead(404).end();
+  });
+  http.listen(0, '127.0.0.1'); await once(http, 'listening');
+  t.after(() => { http.closeAllConnections(); return new Promise(resolve => http.close(resolve)); });
+  const base = await mkdtemp(join(tmpdir(), 'rm-mcp-download-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const parent = openDirectory(base), root = createPrivateDirectory(parent, 'cache'); closeHandle(root); closeHandle(parent);
+  const url = `http://127.0.0.1:${http.address().port}`;
+  const settings = { sites: new Map([['one', { name: 'one', url, apiKey: 'local-key', maxAttachmentBytes: 100, allowInsecureHttp: true, attachmentUploadRoot: null }]]) };
+  const store = createWindowsAttachmentStore({ root: join(base, 'cache') });
+  const server = createServer(settings, { attachmentStore: store });
+  const client = new Client({ name: 'test', version: '1' }), [a, b] = InMemoryTransport.createLinkedPair();
+  t.after(async () => { await client.close(); await server.close(); });
+  await server.connect(b); await client.connect(a);
+  const result = await client.callTool({ name: 'download_attachment', arguments: { attachment_id: 42 } });
+  assert.equal(result.isError ?? false, false, JSON.stringify(result));
+  assert.equal(result.structuredContent.bytes, bytes.length);
+  assert.deepEqual(await readFile(result.structuredContent.path), bytes);
+});
+
 test('base64 image upload yields token and image reference', async (t) => {
   let uploads = 0;
   const settings = { sites: new Map([['one', { name: 'one', url: 'https://one.invalid', apiKey: 'key', maxAttachmentBytes: 100, allowInsecureHttp: false, attachmentUploadRoot: null }]]) };
@@ -30,6 +62,15 @@ test('failed download discards staged output', async (t) => {
   t.after(async () => { await client.close(); await server.close(); }); await server.connect(b); await client.connect(a);
   const result = await client.callTool({ name: 'download_attachment', arguments: { attachment_id: 1 } });
   assert.equal(result.isError, true); assert.equal(discarded, 1); assert.equal(published, 0);
+});
+
+test('aborting while finalizing a download discards the stage', async () => {
+  const { Writable } = await import('node:stream');
+  const controller = new AbortController(); let discarded = 0, published = 0;
+  const writer = new Writable({ write(_chunk, _enc, cb) { cb(); }, final() { controller.abort(); } });
+  const handlers = await directHandlers({ json: async () => ({ data: { attachment: { content_url: 'https://one.invalid/file', filename: 'file' } } }), download: async (_url, output) => { output.write('data'); return 4; }, store: { async stageDownload() { return { writer }; }, async publish() { published++; }, async discard() { discarded++; writer.destroy(); } } });
+  await assert.rejects(handlers.get('download_attachment')({ attachment_id: 2, site: null }, controller.signal));
+  assert.equal(discarded, 1); assert.equal(published, 0);
 });
 
 test('upload rejects non-image base64 and over-limit images before transport', async (t) => {
