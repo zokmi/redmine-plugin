@@ -45,6 +45,14 @@ function forwardedHeaders(headers) {
 }
 
 const server = createServer((incoming, outgoing) => {
+  let upstream;
+  const abort = () => {
+    upstream?.destroy();
+    if (!outgoing.destroyed) outgoing.destroy();
+  };
+  incoming.on('aborted', abort);
+  incoming.on('error', abort);
+  incoming.on('close', () => { if (!incoming.complete) abort(); });
   if (incoming.url !== '/mcp') return end(outgoing, 404);
   const auth = incoming.headersDistinct.authorization ?? [];
   const supplied = Buffer.from(auth[0] ?? '');
@@ -65,11 +73,11 @@ const server = createServer((incoming, outgoing) => {
   delete headers.host;
   delete headers.origin;
   headers.authorization = `Bearer ${workerToken}`;
-  const upstream = request({
+  upstream = request({
     host, port: workerPort, path: '/mcp', method: incoming.method, headers,
   }, response => {
     outgoing.writeHead(response.statusCode, forwardedHeaders(response.headers));
-    response.on('error', error => outgoing.destroy(error));
+    response.on('error', () => outgoing.destroy());
     response.pipe(outgoing);
   });
   outgoing.on('close', () => upstream.destroy());
@@ -136,6 +144,3 @@ function startWorker() {
 }
 
 server.listen(port, host, startWorker);
-
-
-
