@@ -64,7 +64,7 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
-async function configPath(env: NodeJS.ProcessEnv): Promise<string> {
+export async function configPath(env: NodeJS.ProcessEnv): Promise<string> {
   const explicit = env.REDMINE_CONFIG?.trim();
   if (explicit) return expandHome(explicit, env);
   if (await isFile(LEGACY_CONFIG)) return LEGACY_CONFIG;
@@ -184,8 +184,8 @@ function siteSettings(name: string, fields: Fields, defaults: Fields, env: NodeJ
   };
 }
 
-export async function loadSettings(env: NodeJS.ProcessEnv): Promise<Settings> {
-  const { sites: table, ...top } = await readConfig(env);
+export async function loadSettings(env: NodeJS.ProcessEnv, source?: Table): Promise<Settings> {
+  const { sites: table, ...top } = source ?? await readConfig(env);
   const legacy = Object.hasOwn(top, 'url') || Object.hasOwn(top, 'api_key');
   if (table !== undefined && legacy) {
     throw new ConfigError('參數檔同時有最外層的 url／api_key 與 [sites.*] 區塊，請擇一');

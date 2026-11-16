@@ -140,6 +140,13 @@ export function createPrivateDirectory(parent: Handle, name: string): Handle {
   const sd = privateDescriptor();
   try { const handle = relative(parent, name, 0x80 | 0x20, 2, true, sd.descriptor); try { verifyPrivateHandle(handle); return handle; } catch (error) { closeHandle(handle); throw error; } } finally { sd.release(); }
 }
+export function createPrivateFile(parent: Handle, name: string): Handle {
+  const sd = privateDescriptor();
+  try {
+    const handle = relative(parent, name, 0xc0010080, 2, false, sd.descriptor, 0, true);
+    try { verifyPrivateHandle(handle, true); return handle; } catch (error) { closeHandle(handle); throw error; }
+  } finally { sd.release(); }
+}
 export function readHandle(handle: Handle, length: number): Buffer {
   if (!readFile || !Number.isSafeInteger(length) || length < 0 || length > 0x7fffffff) throw new Error('Invalid read length');
   verifyRegularFile(handle);
