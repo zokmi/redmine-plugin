@@ -72,7 +72,8 @@ test('unexpected worker exit returns 503 then reconnects', {skip: process.platfo
 test('worker bounds sessions and evicts idle sessions without evicting active streams', {timeout: 30000}, async t => {
   const { createWorkerHttp } = await import('../dist/worker-http.js');
   const { loadSettings } = await import('../dist/config.js');
-  const service = createWorkerHttp(await loadSettings(env), token, {maxSessions: 2, idleMs: 250, sweepMs: 50});
+  let now = 0;
+  const service = createWorkerHttp(await loadSettings(env), token, {maxSessions: 2, idleMs: 250, sweepMs: 50, now: () => now});
   let closed = false; t.after(() => { if (!closed) return service.close(); });
   const port = await service.listen();
   const url = `http://127.0.0.1:${port}/mcp`;
@@ -86,6 +87,7 @@ test('worker bounds sessions and evicts idle sessions without evicting active st
   await new Promise(r => setTimeout(r, 50)); abandoned.destroy();
   const first = await initialize(); const id1 = first.headers.get('mcp-session-id'); await first.text(); assert.ok(id1);
   const second = await initialize(); const id2 = second.headers.get('mcp-session-id'); await second.text(); assert.ok(id2);
+  await new Promise(r => setTimeout(r, 350));
   const full = await initialize(); assert.equal(full.status, 503); await full.text();
   const controller = new AbortController();
   const stream = await fetch(url, {headers:{Authorization:`Bearer ${token}`, Accept:'text/event-stream', 'mcp-session-id':id1, 'mcp-protocol-version':'2025-03-26'}, signal:controller.signal});
@@ -93,14 +95,18 @@ test('worker bounds sessions and evicts idle sessions without evicting active st
   const slow = connectSocket(port, '127.0.0.1'); await once(slow, 'connect');
   const body = JSON.stringify({jsonrpc:'2.0', id:3, method:'tools/list'});
   slow.write(`POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nAuthorization: Bearer ${token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nmcp-session-id: ${id2}\r\nmcp-protocol-version: 2025-03-26\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body.slice(0, 1)}`);
-  await new Promise(r => setTimeout(r, 650));
+  await new Promise(r => setTimeout(r, 100));
+  now += 300;
+  await new Promise(r => setTimeout(r, 150));
   slow.write(body.slice(1));
   let response = ''; for await (const chunk of slow) response += chunk;
   assert.match(response, /^HTTP\/1\.1 200/);
   const active = await fetch(url, {method:'POST', headers:{...headers, 'mcp-session-id':id1, 'mcp-protocol-version':'2025-03-26'}, body:JSON.stringify({jsonrpc:'2.0', id:2, method:'tools/list'})});
   assert.equal(active.status, 200); await active.text();
   controller.abort();
-  await new Promise(r => setTimeout(r, 650));
+  await new Promise(r => setTimeout(r, 100));
+  now += 300;
+  await new Promise(r => setTimeout(r, 150));
   const expired = await fetch(url, {method:'POST', headers:{...headers, 'mcp-session-id':id2}, body:'{}'});
   assert.equal(expired.status, 404); await expired.text();
   const afterDisconnect = await fetch(url, {method:'POST', headers:{...headers, 'mcp-session-id':id1}, body:'{}'});

@@ -8,10 +8,11 @@ import { createSiteRegistry } from './sites.js';
 import type { AttachmentStore } from './storage/store.js';
 
 type Session = {transport: StreamableHTTPServerTransport; active: number; lastActive: number; closing: boolean};
-export function createWorkerHttp(settings: Settings, token: string, options: {attachmentStore?: AttachmentStore; maxSessions?: number; idleMs?: number; sweepMs?: number} = {}) {
+export function createWorkerHttp(settings: Settings, token: string, options: {attachmentStore?: AttachmentStore; maxSessions?: number; idleMs?: number; sweepMs?: number; now?: () => number} = {}) {
   const maxSessions = options.maxSessions ?? 128;
   const idleMs = options.idleMs ?? 30 * 60_000;
   const sweepMs = options.sweepMs ?? 60_000;
+  const now = options.now ?? Date.now;
   const registry = createSiteRegistry(settings);
   const limit = Math.max(4 * 1024 * 1024, 4 * Math.ceil(Math.max(...Array.from(settings.sites.values(), site => site.maxAttachmentBytes)) / 3) + 1024 * 1024);
   const expected = Buffer.from(`Bearer ${token}`);
@@ -30,7 +31,7 @@ export function createWorkerHttp(settings: Settings, token: string, options: {at
     await entry.transport.close();
   }
   const timer = setInterval(() => {
-    const cutoff = Date.now() - idleMs;
+    const cutoff = now() - idleMs;
     for (const entry of all) if (entry.active === 0 && entry.lastActive <= cutoff) void closeEntry(entry).catch(() => {});
   }, sweepMs);
   timer.unref();
@@ -46,7 +47,7 @@ export function createWorkerHttp(settings: Settings, token: string, options: {at
       function track(current: Session, initializing: boolean) {
         current.active++;
         res.once('close', () => {
-          current.active--; current.lastActive = Date.now();
+          current.active--; current.lastActive = now();
           if (initializing && (!res.writableFinished || !current.transport.sessionId)) void closeEntry(current).catch(() => {});
         });
       }
@@ -61,7 +62,7 @@ export function createWorkerHttp(settings: Settings, token: string, options: {at
       if (!entry && !id && req.method === 'POST' && isInitializeRequest(body)) {
         if (all.size >= maxSessions) { res.writeHead(503).end(); return; }
         const transport = new StreamableHTTPServerTransport({sessionIdGenerator: randomUUID, onsessioninitialized: sid => { if (!entry!.closing) sessions.set(sid, entry!); }});
-        entry = {transport, active: 0, lastActive: Date.now(), closing: false};
+        entry = {transport, active: 0, lastActive: now(), closing: false};
         created = entry; all.add(entry);
         track(entry, true);
         const mcp = createServer(settings, {registry, attachmentStore: options.attachmentStore});
