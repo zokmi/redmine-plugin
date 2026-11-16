@@ -73,3 +73,12 @@
 - [ ] 執行 `npm ci`、`npm test`、現有 release 檢查與 Windows 安裝／重啟測試。驗證來源、發布檔案及 lockfile 一致，且安裝測試環境可在無 Python／uv 的情況下啟動 MCP。
 - [ ] 以 Codex 和 Claude Code 各完成 initialize、工具列舉、讀工單及 worker 復原後重連。兩站確認身分、讀工單、附件串流；獲授權的 main 測試專案驗證上傳、掛載與 SHA-256。保存去敏後的 HTTP 狀態、附件大小、相符雜湊與 MCP 測試結果。
 - [ ] 用設定與附件資料複本演練切換及回復，確認 v0.17.4 可以讀取既有 schema v1。完整驗收後提交切換異動，保留 v0.17.4 作回復版本。
+
+## 驗證結果與切換範圍
+
+- Windows 使用 `install-local-service.ps1 -UseNode` 選擇候選服務。隔離安裝測試在 PATH 沒有 Python 或 uv 的環境完成安裝、驗證權杖、讀取更新後的 TOML、重啟與回滾。未指定 `-UseNode` 時沿用既有 Python 安裝方式。macOS 與 Linux 仍使用既有 Python 服務。
+- 實際 Codex 與 Claude Code 透過隔離 Streamable HTTP 服務呼叫 `list_sites`。強制結束測試 worker 後，端點先回 HTTP 503，再自動復原。兩個應用程式以新 session 呼叫 `get_issue` 成功，模擬 Redmine 收到各一個請求。
+- 使用既有站台設定啟動獨立 Node stdio MCP，`tools/list` 回傳 16 個工具。`main` 和 `new` 各能查詢身分、讀取五筆工單，並下載與 Redmine 記錄大小相符的附件（42,530 與 127,105 bytes）。在授權的 `main/mcp-test` 工單 #94184 驗證 68 bytes PNG 上傳、掛載及重新下載，SHA-256 一致。測試附件 ID 為 260981。
+- 在隔離目錄以實際 Python 部署驗證 Node 候選因連接埠占用而啟動失敗。Python 恢復原連接埠、可完成已授權的 MCP initialize，設定檔內容一致。另以同時存在的合成設定驗證 Python editable 安裝優先選擇部署目錄的 TOML，安裝器拒絕切換到不同來源。
+- Windows 私有暫存資料實測 Python 與 Node 相互讀取 schema v1 快取，包含檔案鎖、ZIP 驗證、保存期限及中途失敗復原。候選程式要求受保護的附件根目錄；不相容的舊目錄應維持原部署。尚未驗證實體斷電、真實 Windows TTY 設定精靈全流程，或任意外部編輯器與設定寫入同時發生的情境。
+- 最後一次 Node 24 完整測試通過 98 項、無跳過。Node 22.22.0 服務測試通過 6 項。既有 Python 完整回歸測試通過 1,052 項、跳過 3 項。v0.17.4 發布檔案與鎖檔檢查通過。
