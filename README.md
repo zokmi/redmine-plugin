@@ -54,7 +54,9 @@ Codex 與 Claude 的 Redmine plugin 都連到 `http://127.0.0.1:18765/mcp`。服
 & '<已安裝 plugin 根目錄>/scripts/install-local-service.ps1'
 ```
 
-腳本需要 Node.js 22 以上和 `uv`，會把服務與依賴安裝到目前使用者的 `%LOCALAPPDATA%\redmine-mcp\service`，並無視窗啟動 Node.js。Python worker 退出後，Node.js 保留共用端點並在兩秒後重啟 worker。復原期間端點回傳 HTTP 503，恢復後可在 Claude Code 使用 `/mcp` 重新連線。
+預設腳本需要 Node.js 22 以上和 `uv`，會把服務與依賴安裝到目前使用者的 `%LOCALAPPDATA%\redmine-mcp\service`，並無視窗啟動 Node.js。Python worker 退出後，Node.js 保留共用端點並在兩秒後重啟 worker。復原期間端點回傳 HTTP 503，恢復後可在 Claude Code 使用 `/mcp` 重新連線。
+
+Node 原生執行環境仍在驗收中，僅供明確選擇測試：以 `-UseNode` 執行安裝腳本，會以 npm 鎖定相依套件建置並啟動候選版本，不需要 Python 或 uv。重啟時使用 `-Restart`，它會沿用目前安裝的執行環境。實際客戶端及附件驗收完成前，預設仍為 Python。
 
 關閉 Claude、Codex 或 PowerShell 後，服務仍在目前的 Windows 登入階段執行。登入後首次啟動、Node.js 已退出或需要手動重啟時，可直接使用已安裝的執行環境：
 
@@ -62,7 +64,7 @@ Codex 與 Claude 的 Redmine plugin 都連到 `http://127.0.0.1:18765/mcp`。服
 & '<已安裝 plugin 根目錄>/scripts/install-local-service.ps1' -Restart
 ```
 
-腳本會印出 Node.js 的 PID 與日誌位置。更新時，先確認 PID 對應 Redmine MCP，結束該程序後執行新版腳本。若從前景 `serve` 切換，先結束前景程序。若舊版曾建立 `Redmine MCP (<SID>)` 工作，先在工作排程器停用並結束該工作，釋出 18765。
+腳本會印出 Node.js 的 PID 與日誌位置。更新時執行新版腳本；腳本確認已記錄程序的 PID、啟動時間與執行檔後才停止程序，啟動失敗時嘗試恢復舊部署。若從前景 `serve` 切換，先結束前景程序。若舊版曾建立 `Redmine MCP (<SID>)` 工作，先在工作排程器停用並結束該工作，釋出 18765。
 
 腳本沿用使用者的 `REDMINE_MCP_LOCAL_TOKEN`，首次安裝才在缺少權杖時建立。首次建立後請完整重開兩個客戶端，必要時重新登入 Windows，讓客戶端取得權杖。權杖與 Redmine API 金鑰分開。
 
@@ -84,7 +86,7 @@ Claude Code 可在 `/plugin` 的 Installed 管理更新與移除；Codex 使用 
 
 ## GitHub Release
 
-發布前同步更新 `plugin.json`、`.claude-plugin/plugin.json`、`.codex-plugin/plugin.json` 與 `redmine-mcp/pyproject.toml` 的版本，並更新 `redmine-mcp/uv.lock`。將變更提交到 `main` 後，建立對應 tag：
+發布前同步更新 `plugin.json`、`.claude-plugin/plugin.json`、`.codex-plugin/plugin.json`、`redmine-mcp/pyproject.toml` 與 `redmine-mcp-node/package.json` 的版本，並更新 `redmine-mcp/uv.lock` 與 `redmine-mcp-node/package-lock.json`。將變更提交到 `main` 後，建立對應 tag：
 
 ```sh
 git tag -a v0.14.2 -m "Redmine plugin v0.14.2"

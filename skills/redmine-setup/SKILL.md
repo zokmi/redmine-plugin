@@ -17,3 +17,5 @@ description: 當使用者首次設定 Redmine plugin、設定站台與 API 金�
 `uvx` 不存在時提供官方 uv 安裝文件：https://docs.astral.sh/uv/getting-started/installation/。
 無法定位已安裝 skill 時，請使用者重新安裝或啟用 plugin；不以另一份 GitHub server 取代內附套件，也不註冊獨立 MCP。
 維護站台時同樣沿用套件絕對路徑，將 setup 改為 config show／config set-site／config remove-site；只執行使用者要求的操作。
+
+Windows 預設保留 Python worker。僅在使用者明確要求測試 Node 候選版本時，安裝腳本加上 `-UseNode`；`-Restart` 會沿用既有部署的執行環境。Node 候選版本尚待實際客戶端及附件驗收。

@@ -25,6 +25,14 @@ def check(tag: str, root: Path) -> None:
     package = tomllib.loads((root / "redmine-mcp/pyproject.toml").read_text(encoding="utf-8"))
     if package["project"]["version"] != version:
         raise ValueError("redmine-mcp/pyproject.toml: version differs from tag")
+    node_package = json.loads((root / "redmine-mcp-node/package.json").read_text(encoding="utf-8"))
+    node_lock = json.loads((root / "redmine-mcp-node/package-lock.json").read_text(encoding="utf-8"))
+    if node_package["version"] != version or node_lock["version"] != version:
+        raise ValueError("Node package or lock version differs from tag")
+    locked_root = node_lock["packages"][""]
+    for key in ("name", "version", "dependencies", "devDependencies", "engines"):
+        if locked_root.get(key) != node_package.get(key):
+            raise ValueError(f"Node lock root differs from package.json: {key}")
     for name in (
         "redmine-issue-writing", "issue-code-consistency-check",
         "release-change-items", "redmine-setup",
