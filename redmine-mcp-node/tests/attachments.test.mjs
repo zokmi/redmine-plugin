@@ -43,3 +43,54 @@ test('upload rejects non-image base64 and over-limit images before transport', a
   }
   assert.equal(uploads, 0);
 });
+
+async function directHandlers({ names = ['one'], json, upload, download, store, max = 100 } = {}) {
+  const { registerAttachments } = await import('../dist/tools/attachments.js');
+  const handlers = new Map();
+  const settings = Object.fromEntries(names.map((name) => [name, { settings: { name, url: `https://${name}.invalid`, maxAttachmentBytes: max, attachmentUploadRoot: 'allowed' }, transport: { json: (...args) => json(name, ...args), upload, download } }]));
+  const sites = { resolve: () => new Map(Object.entries(settings)), resolveForWrite: () => ['one', settings.one] };
+  registerAttachments({ register(def, handler) { handlers.set(def.name, handler); } }, sites, store ?? {});
+  return handlers;
+}
+
+test('base64 size check occurs before scanning excessive invalid tail', async () => {
+  const handlers = await directHandlers({ max: 8 });
+  await assert.rejects(handlers.get('upload_attachment')({ file_path: null, content_base64: 'A'.repeat(10000) + '!', site: null, filename: null }, new AbortController().signal), /超過/);
+});
+
+test('file upload recognizes legacy MIME and returns image references', async () => {
+  let count = 0;
+  const handlers = await directHandlers({ store: { async borrowSource(path, max, root) { assert.equal(root, 'allowed'); return Buffer.from('file'); } }, upload: async () => { count++; return { data: { upload: { token: 't' } } }; } });
+  for (const [file_path, expected] of [['x.svg', 'image/svg+xml'], ['x.tiff', 'image/tiff'], ['x.csv', 'text/csv']]) {
+    const result = await handlers.get('upload_attachment')({ file_path, content_base64: null, site: null, filename: null }, new AbortController().signal);
+    assert.equal(result.content_type, expected); assert.equal(result.token, 't');
+    assert.equal(result.markdown, expected.startsWith('image/') ? `![](${file_path})` : undefined);
+  }
+  assert.equal(count, 3);
+});
+
+test('no hits retain per-site error details', async () => {
+  const { TransportError } = await import('../dist/transport.js');
+  const handlers = await directHandlers({ names: ['one', 'two'], json: async (name) => { throw new TransportError(name === 'one' ? 'not_found' : 'network', name === 'one' ? 'missing' : 'connection failed'); } });
+  await assert.rejects(handlers.get('download_attachment')({ attachment_id: 2, site: null }, new AbortController().signal), /two：connection failed/);
+});
+
+test('cancel after download discards without publishing', async () => {
+  let discarded = 0, published = 0; const controller = new AbortController();
+  const handlers = await directHandlers({ json: async () => ({ data: { attachment: { content_url: 'https://one.invalid/file', filename: 'file' } } }), download: async () => { controller.abort(); return 1; }, store: { async stageDownload() { return { writer: {} }; }, async publish() { published++; return 'path'; }, async discard() { discarded++; } } });
+  await assert.rejects(handlers.get('download_attachment')({ attachment_id: 2, site: null }, controller.signal));
+  assert.equal(discarded, 1); assert.equal(published, 0);
+});
+
+test('base64 accepts Python whitespace and data URI', async () => {
+  const handlers = await directHandlers({ upload: async () => ({ data: { upload: { token: 't' } } }) });
+  const result = await handlers.get('upload_attachment')({ file_path: null, content_base64: '\u0085data:image/png;base64, iVBO\u001cRw0K Ggo=\n', site: null, filename: 'x' }, new AbortController().signal);
+  assert.equal(result.filename, 'x.png'); assert.equal(result.bytes, 8);
+});
+
+test('cancel during staging skips transport and discards', async () => {
+  let discarded = 0, downloads = 0; const controller = new AbortController();
+  const handlers = await directHandlers({ json: async () => ({ data: { attachment: { content_url: 'https://one.invalid/file' } } }), download: async () => { downloads++; return 1; }, store: { async stageDownload() { controller.abort(); return { writer: {} }; }, async discard() { discarded++; } } });
+  await assert.rejects(handlers.get('download_attachment')({ attachment_id: 2, site: null }, controller.signal));
+  assert.equal(discarded, 1); assert.equal(downloads, 0);
+});

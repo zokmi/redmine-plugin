@@ -1,4 +1,6 @@
 import { basename, extname } from 'node:path';
+import { createRequire } from 'node:module';
+const lookupMime = (createRequire(import.meta.url)('mime-types') as { lookup(name: string): string | false }).lookup;
 import { formatAttachment, isObject, object, records, neutralizeUntrustedMarkers } from '../formatting.js';
 import { fanOut, requestObject, type SiteRegistry } from '../sites.js';
 import { ToolError, type ToolRegistry } from '../tool-registry.js';
@@ -10,10 +12,31 @@ function filename(value: string): string {
   return name || 'attachment';
 }
 function image(payload: string, max: number): [Buffer, string, string] {
-  const value = payload.trim().replace(/^data:[^;,]*;base64,/i, '').replace(/\s+/g, '');
-  if (!value || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) throw new ToolError('content_base64 不是合法的 base64 內容');
-  if (Math.floor(value.length / 4) * 3 - 3 > max) throw new ToolError('圖片內容超過大小上限');
-  const data = Buffer.from(value, 'base64');
+  // Stream over the input once. Never allocate a normalized copy larger than the limit.
+  const whitespace = (c: number) => (c >= 9 && c <= 13) || (c >= 28 && c <= 32) || c === 0x85 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
+  let pos = 0;
+  while (pos < payload.length && whitespace(payload.charCodeAt(pos))) pos++;
+  // The data URI prefix is consumed without copying the potentially unbounded MIME label.
+  if (payload.slice(pos, pos + 5).toLowerCase() === 'data:') {
+    let cursor = pos + 5;
+    while (cursor < payload.length && payload[cursor] !== ';' && payload[cursor] !== ',') cursor++;
+    if (payload.slice(cursor, cursor + 8).toLowerCase() === ';base64,') pos = cursor + 8;
+  }
+  const chunks: string[] = []; let chunk = ''; let count = 0; let padding = 0;
+  const cap = Math.ceil(max / 3) * 4 + 4;
+  for (; pos < payload.length; pos++) {
+    const code = payload.charCodeAt(pos);
+    if (whitespace(code)) continue;
+    if (++count > cap) throw new ToolError('圖片內容超過大小上限');
+    const char = payload[pos];
+    if (char === '=') { if (++padding > 2) throw new ToolError('content_base64 不是合法的 base64 內容'); }
+    else if (padding || !((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || char === '+' || char === '/')) throw new ToolError('content_base64 不是合法的 base64 內容');
+    chunk += char;
+    if (chunk.length === 4096) { chunks.push(chunk); chunk = ''; }
+  }
+  if (!count || count % 4 !== 0 || (padding && count < 4)) throw new ToolError('content_base64 不是合法的 base64 內容');
+  chunks.push(chunk);
+  const data = Buffer.from(chunks.join(''), 'base64');
   if (!data.length || data.length > max) throw new ToolError('圖片內容為空或超過大小上限');
   if (data.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return [data, 'image/png', '.png'];
   if (data.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))) return [data, 'image/jpeg', '.jpg'];
@@ -22,7 +45,7 @@ function image(payload: string, max: number): [Buffer, string, string] {
   throw new ToolError('content_base64 只接受 PNG／JPEG／GIF／WebP 圖片');
 }
 function mime(name: string): string {
-  return ({ '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.pdf': 'application/pdf', '.txt': 'text/plain' } as Record<string,string>)[extname(name).toLowerCase()] ?? 'application/octet-stream';
+  return lookupMime(name) || 'application/octet-stream';
 }
 export function registerAttachments(tools: ToolRegistry, sites: SiteRegistry, store: AttachmentStore, timeoutMs?: number): void {
   tools.register(attachmentContracts.list_attachments, async ({ issue_id, site }, signal) => {
@@ -36,7 +59,7 @@ export function registerAttachments(tools: ToolRegistry, sites: SiteRegistry, st
     const targets = sites.resolve(site);
     const result = await fanOut(targets, async (target, signal) => object((await requestObject(target, 'GET', `/attachments/${attachment_id}.json`, { signal })).attachment), { signal, timeoutMs, noneOnNotFound: true });
     const errors = Object.fromEntries(Object.entries(result.payload).filter(([, value]) => isObject(value) && typeof value.error === 'string').map(([key, value]) => [key, (value as { error: string }).error]));
-    if (!result.foundIn.length) throw new ToolError(Object.keys(errors).length ? `查詢附件 ${attachment_id} 時沒有任何站台命中，且部分站台查詢失敗` : `在所有已設定的站台都找不到附件 ${attachment_id}`);
+    if (!result.foundIn.length) throw new ToolError(Object.keys(errors).length ? `查詢附件 ${attachment_id} 時沒有任何站台命中，且部分站台查詢失敗（${Object.entries(errors).map(([name, reason]) => `${neutralizeUntrustedMarkers(name)}：${reason}`).join('；')}）` : `在所有已設定的站台都找不到附件 ${attachment_id}`);
     if (result.foundIn.length > 1) throw new ToolError(`附件 ${attachment_id} 在多個站台都存在（${result.foundIn.join('、')}），請明寫 site 指定要下載哪一個`);
     const name = result.foundIn[0]; const target = targets.get(name)!; const meta = object(result.payload[name]);
     if (typeof meta.content_url !== 'string') throw new ToolError('Redmine 未提供該附件的下載網址');
@@ -46,7 +69,9 @@ export function registerAttachments(tools: ToolRegistry, sites: SiteRegistry, st
     if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(safe)) safe = '_' + safe;
     const staged = await store.stageDownload(target.settings.url, `${attachment_id}_${safe}`);
     try {
+      signal.throwIfAborted();
       const bytes = await target.transport.download(source.href, staged.writer, target.settings.maxAttachmentBytes, signal);
+      signal.throwIfAborted();
       const path = await store.publish(staged);
       return { site: name, attachment_id, filename: neutralizeUntrustedMarkers(basename(path)), path, bytes, ...(Object.keys(errors).length ? { site_errors: errors } : {}) };
     } catch (error) { await store.discard(staged); throw error; }
