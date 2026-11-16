@@ -24,7 +24,7 @@ export function privateDescriptor(): {descriptor: unknown, release: () => void} 
   return {descriptor: out[0], release: () => { free?.(out[0]); }};
 }
 /** Strict allow-list: owner, LOCAL SYSTEM and built-in Administrators only. */
-export function verifyPrivateHandle(handle: unknown): void {
+export function verifyPrivateHandle(handle: unknown, requireProtected = false): void {
   const flags = [0];
   if (!volumeInfo?.(handle, null, 0, null, null, flags, null, 0) || !(flags[0] & 8)) throw new Error('Volume does not support persistent ACLs');
   const owner: unknown[] = [null], dacl: unknown[] = [null], sd: unknown[] = [null];
@@ -36,7 +36,7 @@ export function verifyPrivateHandle(handle: unknown): void {
       const sddl = koffi.decode.string16(out[0]);
       const match = /^O:([^:]+)D:([A-Z]*)(\(.*\))?$/.exec(sddl);
       const sid = currentSid();
-      if (!match || match[1] !== sid || !match[3]) throw new Error('Unsafe owner or DACL');
+      if (!match || match[1] !== sid || !match[3] || (requireProtected && !match[2].includes('P'))) throw new Error('Unsafe owner or DACL');
       const aces = match[3].match(/\([^()]*\)/g) ?? [];
       if (!aces.length || aces.join('') !== match[3]) throw new Error('Unsafe DACL');
       const trusted = new Set([sid, 'SY', 'BA', 'S-1-5-18', 'S-1-5-32-544']);
