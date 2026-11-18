@@ -14,7 +14,8 @@ from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 
-def test_node_recovers_after_worker_crash(tmp_path: Path) -> None:
+@pytest.mark.parametrize("interruption", ["worker_crash", "truncated_request"])
+def test_node_serves_requests_after_interruption(tmp_path: Path, interruption: str) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is unavailable")
@@ -27,10 +28,12 @@ def test_node_recovers_after_worker_crash(tmp_path: Path) -> None:
     (package / "__init__.py").touch()
     (package / "local_worker.py").write_text(
         """
+import json
 import os
 import sys
-from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from threading import Thread
 
 def watch_parent():
     os.read(sys.stdin.fileno(), 1)
@@ -44,6 +47,29 @@ class Handler(BaseHTTPRequestHandler):
             os._exit(17)
         self.send_response(200)
         self.end_headers()
+
+    def do_POST(self):
+        if self.headers.get("X-Truncated"):
+            self.rfile.read(1)
+            Path("truncated-started").touch()
+            self.rfile.read(int(self.headers["Content-Length"]) - 1)
+            return
+        message = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if message["method"] != "initialize":
+            self.send_error(400)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": {
+                "protocolVersion": message["params"]["protocolVersion"],
+                "capabilities": {},
+                "serverInfo": {"name": "fixture-worker", "version": "1"},
+            },
+        }).encode())
 
 server = HTTPServer(("127.0.0.1", 0), Handler)
 print(server.server_port, flush=True)
@@ -76,8 +102,38 @@ server.serve_forever()
                 pytest.fail("Worker did not become ready")
 
             wait_for_worker()
-            assert http.get("/mcp", headers={"X-Crash": "1"}).status_code == 502
-            wait_for_worker()
+            if interruption == "worker_crash":
+                assert http.get("/mcp", headers={"X-Crash": "1"}).status_code == 502
+                wait_for_worker()
+            else:
+                with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+                    client.sendall(
+                        (
+                            f"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                            f"Authorization: Bearer {token}\r\n"
+                            "Content-Length: 20\r\nX-Truncated: 1\r\n\r\n{"
+                        ).encode()
+                    )
+                    for _ in range(100):
+                        if (tmp_path / "truncated-started").exists():
+                            break
+                        time.sleep(0.02)
+                    else:
+                        pytest.fail("Worker did not receive the partial request")
+
+                initialized = http.post("/mcp", json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1"},
+                    },
+                })
+                assert initialized.status_code == 200
+                assert initialized.json()["result"]["serverInfo"]["name"] == "fixture-worker"
+                assert service.poll() is None
         finally:
             # The fixture worker exits when its parent closes stdin.
             service.terminate()
