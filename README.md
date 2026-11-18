@@ -56,7 +56,7 @@ Codex 與 Claude 的 Redmine plugin 都連到 `http://127.0.0.1:18765/mcp`。服
 
 預設腳本需要 Node.js 22 以上和 `uv`，會把服務與依賴安裝到目前使用者的 `%LOCALAPPDATA%\redmine-mcp\service`，並無視窗啟動 Node.js。Python worker 退出後，Node.js 保留共用端點並在兩秒後重啟 worker。復原期間端點回傳 HTTP 503，恢復後可在 Claude Code 使用 `/mcp` 重新連線。
 
-Node 原生執行環境仍在驗收中，僅供明確選擇測試：以 `-UseNode` 執行安裝腳本，會以 npm 鎖定相依套件建置並啟動候選版本，不需要 Python 或 uv。重啟時使用 `-Restart`，它會沿用目前安裝的執行環境。實際客戶端及附件驗收完成前，預設仍為 Python。
+v0.18.0 提供可選用的 Windows Node 原生執行環境：以 `-UseNode` 執行安裝腳本，會以 npm 鎖定相依套件建置並啟動候選版本，不需要 Python 或 uv。重啟時使用 `-Restart`，它會沿用目前安裝的執行環境。此版本已通過 Codex、Claude Code、兩站查詢與附件驗證；預設安裝仍使用 Python，macOS／Linux 沿用既有服務。
 
 關閉 Claude、Codex 或 PowerShell 後，服務仍在目前的 Windows 登入階段執行。登入後首次啟動、Node.js 已退出或需要手動重啟時，可直接使用已安裝的執行環境：
 

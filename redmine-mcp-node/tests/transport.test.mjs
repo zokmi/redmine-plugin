@@ -153,7 +153,7 @@ test('JSON and raw upload reuse a connection and preserve the Redmine base path'
   assert.deepEqual(await transport.upload('檔案 &.bin', bytes), { status: 201, data: { ok: true } });
   assert.equal(requests[0].socket, requests[1].socket);
   assert.equal(requests[0].url, '/redmine/issues.json?q=a+b');
-  assert.equal(requests[0].headers['user-agent'], 'redmine-mcp/0.17.4');
+  assert.equal(requests[0].headers['user-agent'], 'redmine-mcp/' + JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version);
   assert.equal(requests[1].headers['content-type'], 'application/octet-stream');
   assert.equal(requests[1].headers['x-redmine-api-key'], secret);
   assert.equal(new URL(requests[1].url, url).pathname, '/redmine/uploads.json');
