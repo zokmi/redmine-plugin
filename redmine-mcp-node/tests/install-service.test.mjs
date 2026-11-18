@@ -11,6 +11,24 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 const sourceScript = resolve('../scripts/install-local-service.ps1');
 const sourceNode = resolve('.');
+const environmentFixture = resolve('tests/fixtures/installer-environment.ps1');
+
+for (const shell of ['pwsh.exe', 'powershell.exe']) {
+  test(`${shell} preserves PYTHONUTF8 during installer configuration probes`, {skip:process.platform !== 'win32'}, async t => {
+    for (const [state, value] of [['absent', undefined], ['empty', ''], ['nonempty', '0']]) {
+      await t.test(state, () => {
+        const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(PYTHONUTF8|REDMINE_CONFIG)$/i.test(name)));
+        if (value !== undefined) env.PYTHONUTF8 = value;
+        execFileSync(shell, ['-NoProfile', '-File', environmentFixture, sourceScript, state], {env, encoding:'utf8'});
+      });
+    }
+  });
+}
+
+test('installer stops the launched process when environment restoration fails', {skip:process.platform !== 'win32'}, () => {
+  execFileSync('pwsh.exe', ['-NoProfile', '-File', environmentFixture, sourceScript, 'launch-restore-failure'], {encoding:'utf8'});
+});
+
 test('doctor reports an absent installation from the bundled helper', {skip:process.platform !== 'win32'}, async t => {
   const root = await mkdtemp(join(tmpdir(), 'redmine-no-service-'));
   t.after(() => rm(root, {recursive:true, force:true}));
@@ -91,12 +109,12 @@ function npm.cmd {
   await copyFile(resolve('../scripts/doctor.ps1'), join(root, 'scripts', 'doctor.ps1'));
   const s = createServer().listen(0, '127.0.0.1'); await once(s, 'listening'); const port = s.address().port; await new Promise(r => s.close(r));
   const config = join(root, '使用者設定.toml'); const fixture = 'download_dir = "unused-legacy-setting"\n[sites.test]\nurl = "https://example.invalid"\napi_key = "fixture-key"\n'; await writeFile(config, fixture);
-  const storage = join(root, '附件');
+  const storage = join(root, 'redmine-mcp', 'attachments');
   const pwsh = execFileSync('where.exe', ['pwsh.exe'], {encoding:'utf8'}).trim().split(/\r?\n/)[0];
   const env = {...process.env};
   for (const name of Object.keys(env)) if (/^redmine_/i.test(name) || /^path$/i.test(name) || /^(pythonpath|pythonhome|node_options|node_path|node_extra_ca_certs|ssl_cert_file|ssl_cert_dir|requests_ca_bundle|curl_ca_bundle|https_proxy|http_proxy|all_proxy|no_proxy)$/i.test(name)) delete env[name];
   const systemPath = [join(process.env.SystemRoot, 'System32'), process.env.SystemRoot].join(';');
-  Object.assign(env, {PATH:[dirname(process.execPath), systemPath].join(';'), LOCALAPPDATA:root, REDMINE_MCP_STORAGE_ROOT:storage, REDMINE_MCP_LOCAL_TOKEN:'a'.repeat(32), INSTALL_FIXTURE_USER_TOKEN:'a'.repeat(32), INSTALL_FIXTURE_NODE_MODULES:join(sourceNode, 'node_modules'), REDMINE_CONFIG:config});
+  Object.assign(env, {PATH:[dirname(process.execPath), systemPath].join(';'), LOCALAPPDATA:root, INSTALL_FIXTURE_USER_TOKEN:'a'.repeat(32), INSTALL_FIXTURE_NODE_MODULES:join(sourceNode, 'node_modules'), REDMINE_CONFIG:config});
   const run = async (program, args, expected = 0, extra = {}) => {
     const log = join(root, 'installer.log');
     const fd = openSync(log, 'w');
@@ -115,6 +133,7 @@ function npm.cmd {
   const manifest = join(root, 'redmine-mcp', 'service', 'active.json');
   let state = JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, ''));
   pid = state.pid; assert.equal(state.engine, 'node');
+  assert.equal(state.servicePaths.REDMINE_MCP_STORAGE_ROOT, undefined);
   assert.doesNotMatch(JSON.stringify(state), /fixture-key|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
   const attachment = join(storage, 'fixture.bin'); await writeFile(attachment, 'attachment fixture');
   assert.equal((await fetch(`http://127.0.0.1:${port}/mcp`)).status, 401);

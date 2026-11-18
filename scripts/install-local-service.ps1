@@ -48,6 +48,29 @@ if (-not $token) {
     $persistToken = $true
 }
 if ($token -cnotmatch '\A[A-Za-z0-9_-]{32,}\z') { throw "$tokenName must contain at least 32 URL-safe characters." }
+function Get-ProcessEnvironmentEntry([string]$name) {
+    # Enumerate entries because Windows PowerShell's .NET getter can return null for an inherited empty value.
+    Get-ChildItem Env: | Where-Object Name -eq $name | Select-Object -First 1
+}
+function Restore-ProcessEnvironmentVariable([string]$name, $previous) {
+    if ($null -eq $previous) {
+        # Passing null to the .NET setter from PowerShell 7.6 can leave an empty entry.
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+    } elseif ($previous.Value -ceq '' -and $PSVersionTable.PSVersion -lt [version]'7.5') {
+        # Older PowerShell versions delete empty values through the provider. Win32 can restore them.
+        if (-not ('RedmineMcp.ProcessEnvironment' -as [type])) {
+            Add-Type -Namespace RedmineMcp -Name ProcessEnvironment -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+public static extern bool SetEnvironmentVariableW(string name, string value);
+'@
+        }
+        if (-not [RedmineMcp.ProcessEnvironment]::SetEnvironmentVariableW($name, '')) {
+            throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+        }
+    } else {
+        Set-Item -LiteralPath "Env:$name" -Value $previous.Value
+    }
+}
 function Get-ServicePaths {
     $paths = @{}
     foreach ($entry in Get-ChildItem Env:) {
@@ -72,7 +95,7 @@ function Resolve-ServiceConfig($item, [bool]$legacyCombined = $false) {
             $suffix = [Guid]::NewGuid().ToString('N')
             $probeOut = Join-Path $serviceRoot ('.config-path-' + $suffix + '.out')
             $probeErr = Join-Path $serviceRoot ('.config-path-' + $suffix + '.err')
-            $previousPythonUtf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'Process')
+            $previousPythonUtf8 = Get-ProcessEnvironmentEntry 'PYTHONUTF8'
             try {
                 [Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'Process')
                 $arguments = '"{0}" --print-path' -f (Join-Path $PSScriptRoot 'validate-service-config.py')
@@ -81,7 +104,10 @@ function Resolve-ServiceConfig($item, [bool]$legacyCombined = $false) {
                 if ($probe.ExitCode -ne 0 -or $paths.Count -ne 1 -or -not [IO.Path]::IsPathRooted($paths[0])) { throw 'Invalid configuration path.' }
             }
             catch { throw 'Cannot determine the Python deployment configuration path.' }
-            finally { [Environment]::SetEnvironmentVariable('PYTHONUTF8', $previousPythonUtf8, 'Process'); Remove-Item -LiteralPath $probeOut, $probeErr -Force -ErrorAction SilentlyContinue }
+            finally {
+                Restore-ProcessEnvironmentVariable 'PYTHONUTF8' $previousPythonUtf8
+                Remove-Item -LiteralPath $probeOut, $probeErr -Force -ErrorAction SilentlyContinue
+            }
             $config = $paths[0]
         }
     }
@@ -172,23 +198,27 @@ function Validate-Storage($item) {
 }
 function Validate-Configuration($item) {
     $dir = Join-Path $serviceRoot $item.deployment
-    $previousPythonUtf8 = [Environment]::GetEnvironmentVariable('PYTHONUTF8', 'Process')
+    $isPython = $item.engine -ne 'node'
+    $previousPythonUtf8 = if ($isPython) { Get-ProcessEnvironmentEntry 'PYTHONUTF8' }
     $suffix = [Guid]::NewGuid().ToString('N')
     $stdout = Join-Path $serviceRoot ('.validate-' + $suffix + '.out')
     $stderr = Join-Path $serviceRoot ('.validate-' + $suffix + '.err')
     try {
-        if ($item.engine -eq 'node') {
-            $program = $node
-            $arguments = '"{0}" "{1}"' -f (Join-Path $PSScriptRoot 'validate-service-config.mjs'), (Join-Path $dir 'dist/config.js')
-        } else {
+        if ($isPython) {
             [Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'Process')
             $program = Join-Path $dir '.venv/Scripts/python.exe'
             $arguments = '"{0}"' -f (Join-Path $PSScriptRoot 'validate-service-config.py')
+        } else {
+            $program = $node
+            $arguments = '"{0}" "{1}"' -f (Join-Path $PSScriptRoot 'validate-service-config.mjs'), (Join-Path $dir 'dist/config.js')
         }
         $validator = Start-Process -FilePath $program -ArgumentList $arguments -WorkingDirectory $dir -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         if ($validator.ExitCode -ne 0) { throw 'Configuration validation failed.' }
     } catch { throw 'Configuration validation failed; existing service was not stopped.' }
-    finally { [Environment]::SetEnvironmentVariable('PYTHONUTF8', $previousPythonUtf8, 'Process'); Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue }
+    finally {
+        if ($isPython) { Restore-ProcessEnvironmentVariable 'PYTHONUTF8' $previousPythonUtf8 }
+        Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    }
 }
 function Find-OwnedProcess($item) {
     $p = Get-Process -Id ([int]$item.pid) -ErrorAction SilentlyContinue
@@ -211,12 +241,22 @@ function Start-ServiceDeployment($item, [ref]$processRef) {
     $dir = Join-Path $serviceRoot $item.deployment
     $out = Join-Path $dir 'service.log'; $err = Join-Path $dir 'service.err.log'
     $args = if ($item.engine -eq 'node') { '"{0}" serve --port {1}' -f (Join-Path $dir 'dist/cli.js'), $Port } else { '"{0}" "{1}" {2}' -f (Join-Path $dir 'local-service.mjs'), (Join-Path $dir '.venv/Scripts/python.exe'), $Port }
-    $previousRoot = [Environment]::GetEnvironmentVariable('REDMINE_MCP_STORAGE_ROOT', 'Process')
-    $previous = [Environment]::GetEnvironmentVariable($tokenName, 'Process')
-    try { if ($item.engine -eq 'node' -and -not $previousRoot) { [Environment]::SetEnvironmentVariable('REDMINE_MCP_STORAGE_ROOT', (Join-Path $env:LOCALAPPDATA 'redmine-mcp/attachments'), 'Process') }; [Environment]::SetEnvironmentVariable($tokenName, $token, 'Process'); $p = Start-Process -FilePath $node -WindowStyle Hidden -PassThru -WorkingDirectory $dir -ArgumentList $args -RedirectStandardOutput $out -RedirectStandardError $err }
-    finally { [Environment]::SetEnvironmentVariable($tokenName, $previous, 'Process'); [Environment]::SetEnvironmentVariable('REDMINE_MCP_STORAGE_ROOT', $previousRoot, 'Process') }
-    $deadline = (Get-Date).AddSeconds(100)
+    $previousRoot = Get-ProcessEnvironmentEntry 'REDMINE_MCP_STORAGE_ROOT'
+    $previousToken = Get-ProcessEnvironmentEntry $tokenName
+    $useDefaultStorage = $item.engine -eq 'node' -and ($null -eq $previousRoot -or -not $previousRoot.Value)
+    $p = $null
     try {
+        try {
+            if ($useDefaultStorage) {
+                [Environment]::SetEnvironmentVariable('REDMINE_MCP_STORAGE_ROOT', (Join-Path $env:LOCALAPPDATA 'redmine-mcp/attachments'), 'Process')
+            }
+            [Environment]::SetEnvironmentVariable($tokenName, $token, 'Process')
+            $p = Start-Process -FilePath $node -WindowStyle Hidden -PassThru -WorkingDirectory $dir -ArgumentList $args -RedirectStandardOutput $out -RedirectStandardError $err
+        } finally {
+            try { Restore-ProcessEnvironmentVariable $tokenName $previousToken }
+            finally { if ($useDefaultStorage) { Restore-ProcessEnvironmentVariable 'REDMINE_MCP_STORAGE_ROOT' $previousRoot } }
+        }
+        $deadline = (Get-Date).AddSeconds(100)
         while ((Get-Date) -lt $deadline) {
             $p.Refresh(); if ($p.HasExited) { throw "Service exited; see $err" }
             if (Select-String -LiteralPath $out -SimpleMatch "Redmine MCP Node.js listening at http://127.0.0.1:$Port/mcp" -Quiet -ErrorAction SilentlyContinue) {
@@ -231,7 +271,13 @@ function Start-ServiceDeployment($item, [ref]$processRef) {
             Start-Sleep -Milliseconds 200
         }
         throw "Service startup timed out; see $err"
-    } catch { Stop-Process -InputObject $p -ErrorAction SilentlyContinue; $null = $p.WaitForExit(5000); throw }
+    } catch {
+        if ($p) {
+            Stop-Process -InputObject $p -ErrorAction SilentlyContinue
+            $null = $p.WaitForExit(5000)
+        }
+        throw
+    }
 }
 function Save-State($item) {
     $temp = Join-Path $serviceRoot ('.active-' + [Guid]::NewGuid().ToString('N') + '.tmp')
@@ -277,7 +323,7 @@ function Invoke-ServiceDoctor($item) {
         # The caller may not inherit explicit paths set by the installation shell.
         $savedPaths = if ($item.servicePaths) { $item.servicePaths } else { $item.recoveryPaths }
         foreach ($path in $savedPaths.PSObject.Properties) {
-            if ($path.Name -in @('REDMINE_CONFIG','REDMINE_MCP_STORAGE_ROOT') -and $path.Value -and $null -eq [Environment]::GetEnvironmentVariable($path.Name, 'Process')) {
+            if ($path.Name -in @('REDMINE_CONFIG','REDMINE_MCP_STORAGE_ROOT') -and $path.Value -and $null -eq (Get-ProcessEnvironmentEntry $path.Name)) {
                 [Environment]::SetEnvironmentVariable($path.Name, [string]$path.Value, 'Process')
                 $restoredPaths += $path.Name
             }
@@ -305,7 +351,7 @@ function Invoke-ServiceDoctor($item) {
         if ($launched -and -not $launched.HasExited) { $launched.Kill() }
         throw
     } finally {
-        foreach ($name in $restoredPaths) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
+        foreach ($name in $restoredPaths) { Restore-ProcessEnvironmentVariable $name $null }
     }
 }
 function Install-DoctorHelper {
