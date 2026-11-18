@@ -21,7 +21,7 @@ def test_plugin_loads_all_maintained_skills(platform):
     assert skill_root == (ROOT / "skills").resolve()
     for skill in (
         "redmine-issue-writing", "issue-code-consistency-check",
-        "release-change-items", "redmine-setup",
+        "release-change-items", "redmine-setup", "redmine-doctor",
     ):
         entry = skill_root / skill / "SKILL.md"
         assert entry.is_file(), entry

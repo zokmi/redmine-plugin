@@ -1,6 +1,6 @@
 ---
 name: redmine-setup
-description: 當使用者首次設定 Redmine plugin、設定站台與 API 金鑰，或安裝後 MCP 因缺少設定而無法啟動時使用。
+description: 當使用者首次設定 Redmine plugin、設定站台與 API 金鑰，或安裝後 MCP 因缺少設定而無法啟動時使用。連線中斷先用 redmine-doctor 診斷。
 ---
 
 # Redmine plugin 站台初始化
@@ -19,3 +19,5 @@ description: 當使用者首次設定 Redmine plugin、設定站台與 API 金�
 維護站台時同樣沿用套件絕對路徑，將 setup 改為 config show／config set-site／config remove-site；只執行使用者要求的操作。
 
 Windows 預設保留 Python worker。僅在使用者明確要求測試 Node 候選版本時，安裝腳本加上 `-UseNode`；`-Restart` 會沿用既有部署的執行環境。Node 候選版本尚待實際客戶端及附件驗收。
+
+當本機 MCP 出現 ECONNREFUSED、重連失敗或啟動逾時時，自動使用 redmine-doctor skill；成功後重連並以 get_current_user 驗證，再繼續任務。

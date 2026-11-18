@@ -58,21 +58,15 @@ Codex 與 Claude 的 Redmine plugin 都連到 `http://127.0.0.1:18765/mcp`。服
 
 v0.18.0 提供可選用的 Windows Node 原生執行環境：以 `-UseNode` 執行安裝腳本，會以 npm 鎖定相依套件建置並啟動候選版本，不需要 Python 或 uv。重啟時使用 `-Restart`，它會沿用目前安裝的執行環境。此版本已通過 Codex、Claude Code、兩站查詢與附件驗證；預設安裝仍使用 Python，macOS／Linux 沿用既有服務。
 
-安裝或手動重啟成功後，Windows 會為目前使用者建立 `Redmine MCP Recovery (<SID>)` 排程。排程在該使用者登入時與登入期間每分鐘檢查服務。若共用端點的 Node.js 程序已退出且原連接埠空閒，排程會啟動同一份已安裝的服務；程序仍正常監聽時直接結束檢查。已安裝舊版的使用者可在原有設定環境執行一次 `-Restart` 啟用排程：
+當 agent 發現 MCP 的 `ECONNREFUSED`、重連失敗或啟動逾時時，使用 `redmine-doctor` skill 執行診斷。Windows 可以從已安裝 plugin 直接執行：
 
 ```powershell
-& '<已安裝 plugin 根目錄>/scripts/install-local-service.ps1' -Restart
+& '<已安裝 plugin 根目錄>/scripts/doctor.ps1'
 ```
 
-腳本會印出 Node.js 的 PID 與日誌位置。更新時執行新版腳本；腳本確認已記錄程序的 PID、啟動時間與執行檔後才停止程序，啟動失敗時嘗試恢復舊部署。若從前景 `serve` 切換，先結束前景程序。若舊版曾建立 `Redmine MCP (<SID>)` 工作，先在工作排程器停用並結束該工作，釋出 18765。
+Node CLI 也提供 `node '<套件絕對路徑>/dist/cli.js' doctor`。Doctor 會檢查部署紀錄、程序身分、監聽連接埠及 MCP 授權初始化。服務已健康時回報結果；確認已安裝服務停止且連接埠空閒時，自動啟動同一份服務並驗證。遇到外部程序占用、PID 重用、權杖或設定不相容時，回報具體原因並結束。Agent 在成功後重新連線，以 `get_current_user` 驗證再接續任務。
 
-也可手動執行同一份排程使用的恢復腳本。若其他程序占用連接埠、PID 已重用，或服務的權杖、設定或環境與紀錄不符，腳本會報告原因並保留目前狀態。
-
-```powershell
-& "$env:LOCALAPPDATA\redmine-mcp\service\recovery\install-local-service.ps1" -Recover
-```
-
-新部署會分別保存環境與設定內容的指紋。復原會沿用使用者層級的權杖和已保存的設定及附件儲存路徑。僅在安裝終端機設定的其他環境變數可能不會出現在排程環境，站台金鑰可沿用使用者的 TOML 設定檔。修改設定後可執行 `-Restart`，腳本會先驗證新設定；變更執行環境或權杖時則拒絕停止既有服務。切換至 `-UseNode` 前，若設定已修改，請先重啟既有部署。重啟新設定失敗時，若原設定內容已不可取得，腳本會保留現有設定並報告未恢復舊服務。
+安裝及手動 `-Restart` 會保存固定的 doctor 入口與設定驗證腳本。已安裝舊版的使用者可在原有設定環境執行一次 `-Restart` 採用最新診斷功能。設定檔修改後同樣使用 `-Restart`，它會先驗證設定，並沿用原引擎。診斷引數與狀態檔不含明文權杖或 API 金鑰。
 
 舊版狀態檔沒有可驗證的環境指紋，不能直接用 `-UseNode` 升級；請先在與既有服務相同的設定環境中執行 `-Restart`，確認服務正常後再切換。舊版未記錄啟動時環境，因此首次採用無法證明環境完全相同。早期 Node 候選版使用混合指紋；若當時的設定已修改，請先恢復服務啟動時的設定並重啟一次，以採用新指紋格式。
 
@@ -92,7 +86,7 @@ uvx --python 3.13 --from '<已安裝 plugin 根目錄>/redmine-mcp' redmine-mcp 
 
 新版本發布後，透過 plugin 管理器更新 marketplace 與 plugin，重開工具載入新版本。發布前同步更新 `plugin.json`、`.claude-plugin/plugin.json`、`.codex-plugin/plugin.json` 與 `redmine-mcp/pyproject.toml` 的版本，避免舊版本快取。
 
-Claude Code 可在 `/plugin` 的 Installed 管理更新與移除；Codex 使用 plugin 管理介面，或 `codex plugin remove redmine@redmine-plugins`。若不再使用 Windows 共用服務，可在工作排程器停用或移除 `Redmine MCP Recovery (<SID>)`，並停止服務程序。若不再使用 Redmine，可自行刪除上述參數檔。
+Claude Code 可在 `/plugin` 的 Installed 管理更新與移除；Codex 使用 plugin 管理介面，或 `codex plugin remove redmine@redmine-plugins`。若不再使用 Windows 共用服務，可停止服務程序。若不再使用 Redmine，可自行刪除上述參數檔。
 
 ## GitHub Release
 
