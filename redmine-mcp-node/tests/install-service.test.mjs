@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { openSync, closeSync } from 'node:fs';
-import { mkdtemp, readFile, writeFile, mkdir, cp, copyFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, writeFile, mkdir, cp, copyFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createServer } from 'node:net';
@@ -11,6 +11,22 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 const sourceScript = resolve('../scripts/install-local-service.ps1');
 const sourceNode = resolve('.');
+test('doctor reports an absent installation from the bundled helper', {skip:process.platform !== 'win32'}, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'redmine-no-service-'));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const child = spawn(process.execPath, [join(sourceNode, 'dist', 'cli.js'), 'doctor'], {
+    env:{...process.env, LOCALAPPDATA:root},
+  });
+  const chunks = [];
+  child.stdout.on('data', chunk => chunks.push(chunk));
+  child.stderr.on('data', chunk => chunks.push(chunk));
+  const [code] = await once(child, 'close');
+  const output = Buffer.concat(chunks).toString('utf8').trim();
+  assert.equal(code, 1, output);
+  assert.match(output, /^NOT_INSTALLED: [^\r\n]+$/);
+  await assert.rejects(access(join(root, 'redmine-mcp')), {code:'ENOENT'});
+});
+
 test('Node opt-in preserves verified context across restart and rollback', {skip:process.platform !== 'win32', timeout:480000}, async t => {
   const root = await mkdtemp(join(tmpdir(), 'redmine-install-'));
   let pid;
@@ -21,6 +37,25 @@ test('Node opt-in preserves verified context across restart and rollback', {skip
   for (const name of ['package.json', 'package-lock.json', 'tsconfig.json', 'src']) {
     await cp(join(sourceNode, name), join(nodeFixture, name), {recursive:true});
   }
+  const supervisor = join(nodeFixture, 'src', 'supervisor.ts');
+  const supervisorSource = await readFile(supervisor, 'utf8');
+  const stuckSupervisor = supervisorSource.replace(
+    "import { createServer, request } from 'node:http';",
+    "import { existsSync } from 'node:fs';\nimport { createServer, request } from 'node:http';",
+  ).replace(
+    '  const headers = forwardedHeaders(incoming.headers);',
+    "  if (existsSync('.fixture-unavailable-' + process.pid)) return end(outgoing, 503);\n  const headers = forwardedHeaders(incoming.headers);",
+  ) + `
+const watchFixtureClose = setInterval(() => {
+  if (!existsSync('.fixture-close-' + process.pid)) return;
+  clearInterval(watchFixtureClose);
+  server.close();
+  server.closeAllConnections();
+}, 100);
+watchFixtureClose.unref();
+`;
+  assert.match(stuckSupervisor, /existsSync\('\.fixture-unavailable-'/);
+  await writeFile(supervisor, stuckSupervisor);
   const script = join(root, 'scripts', 'install-local-service.ps1');
   for (const name of ['validate-service-config.mjs', 'validate-service-config.py']) {
     await copyFile(resolve('../scripts', name), join(root, 'scripts', name));
@@ -30,14 +65,11 @@ test('Node opt-in preserves verified context across restart and rollback', {skip
   assert.notEqual(fixtureScript, original);
   const beforeInjection = fixtureScript;
   fixtureScript = fixtureScript.replace('    $started = Start-ServiceDeployment $item', "    if ($env:INSTALL_FIXTURE_FAIL) { throw 'fixture startup failure' }\n    $started = Start-ServiceDeployment $item");
-  assert.notEqual(fixtureScript, beforeInjection); await writeFile(script, fixtureScript);
+  assert.notEqual(fixtureScript, beforeInjection);
   const beforeResolverInjection = fixtureScript;
   fixtureScript = fixtureScript.replace('function Resolve-ServiceConfig($item, [bool]$legacyCombined = $false) {', "function Resolve-ServiceConfig($item, [bool]$legacyCombined = $false) {\n    if ($env:INSTALL_FIXTURE_DIFFERENT_SOURCE -and $item.deployment -ne $env:INSTALL_FIXTURE_OLD_DEPLOYMENT) { return $env:INSTALL_FIXTURE_DIFFERENT_SOURCE }");
   assert.notEqual(fixtureScript, beforeResolverInjection);
   fixtureScript = fixtureScript.replace("$ErrorActionPreference = 'Stop'", `$ErrorActionPreference = 'Stop'
-function Register-ScheduledTask($TaskName, $Xml, [switch]$Force) {
-    @{ name = $TaskName; xml = $Xml } | ConvertTo-Json -Compress | Set-Content -LiteralPath $env:INSTALL_FIXTURE_TASK_SPEC -Encoding UTF8
-}
 # Reuse the already installed dependency tree so the lifecycle fixture can run offline.
 function npm.cmd {
     if ($args[0] -eq 'ci') {
@@ -55,30 +87,29 @@ function npm.cmd {
         & (Get-Command npm.cmd -CommandType Application | Select-Object -First 1).Source @args
     }
 }`);
-  assert.match(fixtureScript, /function Register-ScheduledTask/);
   await writeFile(script, fixtureScript);
+  await copyFile(resolve('../scripts/doctor.ps1'), join(root, 'scripts', 'doctor.ps1'));
   const s = createServer().listen(0, '127.0.0.1'); await once(s, 'listening'); const port = s.address().port; await new Promise(r => s.close(r));
   const config = join(root, '使用者設定.toml'); const fixture = 'download_dir = "unused-legacy-setting"\n[sites.test]\nurl = "https://example.invalid"\napi_key = "fixture-key"\n'; await writeFile(config, fixture);
   const storage = join(root, '附件');
   const pwsh = execFileSync('where.exe', ['pwsh.exe'], {encoding:'utf8'}).trim().split(/\r?\n/)[0];
   const env = {...process.env};
   for (const name of Object.keys(env)) if (/^redmine_/i.test(name) || /^path$/i.test(name) || /^(pythonpath|pythonhome|node_options|node_path|node_extra_ca_certs|ssl_cert_file|ssl_cert_dir|requests_ca_bundle|curl_ca_bundle|https_proxy|http_proxy|all_proxy|no_proxy)$/i.test(name)) delete env[name];
-  const specPath = join(root, 'task.json');
   const systemPath = [join(process.env.SystemRoot, 'System32'), process.env.SystemRoot].join(';');
-  Object.assign(env, {PATH:[dirname(process.execPath), systemPath].join(';'), LOCALAPPDATA:root, REDMINE_MCP_STORAGE_ROOT:storage, REDMINE_MCP_LOCAL_TOKEN:'a'.repeat(32), INSTALL_FIXTURE_USER_TOKEN:'a'.repeat(32), INSTALL_FIXTURE_TASK_SPEC:specPath, INSTALL_FIXTURE_NODE_MODULES:join(sourceNode, 'node_modules'), REDMINE_CONFIG:config});
-  const invoke = async (args, expected = 0, extra = {}, scriptPath = script) => {
+  Object.assign(env, {PATH:[dirname(process.execPath), systemPath].join(';'), LOCALAPPDATA:root, REDMINE_MCP_STORAGE_ROOT:storage, REDMINE_MCP_LOCAL_TOKEN:'a'.repeat(32), INSTALL_FIXTURE_USER_TOKEN:'a'.repeat(32), INSTALL_FIXTURE_NODE_MODULES:join(sourceNode, 'node_modules'), REDMINE_CONFIG:config});
+  const run = async (program, args, expected = 0, extra = {}) => {
     const log = join(root, 'installer.log');
     const fd = openSync(log, 'w');
     const childEnv = {...env, ...extra};
     for (const name of Object.keys(childEnv)) if (childEnv[name] === undefined) delete childEnv[name];
-    const portArgument = args.includes('-Port') || args.includes('-Recover') ? [] : ['-Port', String(port)];
-    const shell = scriptPath === script ? pwsh : join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const child = spawn(shell, ['-NoProfile','-File',scriptPath,...args,...portArgument], {env:childEnv, stdio:['ignore',fd,fd]});
+    const child = spawn(program, args, {env:childEnv, stdio:['ignore',fd,fd]});
     const [code] = await once(child, 'exit'); closeSync(fd);
     const output = await readFile(log, 'utf8');
     assert.equal(code, expected, output);
     return output;
   };
+  const invoke = (args, expected, extra) =>
+    run(pwsh, ['-NoProfile', '-File', script, ...args, ...(args.includes('-Port') ? [] : ['-Port', String(port)])], expected, extra);
   const initialize = () => fetch(`http://127.0.0.1:${port}/mcp`, {method:'POST', headers:{Authorization:`Bearer ${'a'.repeat(32)}`, Accept:'application/json, text/event-stream', 'Content-Type':'application/json'}, body:JSON.stringify({jsonrpc:'2.0', id:1, method:'initialize', params:{protocolVersion:'2025-03-26', capabilities:{}, clientInfo:{name:'fixture',version:'1'}}})});
   await invoke(['-UseNode']);
   const manifest = join(root, 'redmine-mcp', 'service', 'active.json');
@@ -147,24 +178,57 @@ function npm.cmd {
   await invoke(['-Restart'], 1);
   assert.equal((await fetch(`http://127.0.0.1:${port}/mcp`)).status, 401);
   await writeFile(manifest, JSON.stringify(state));
-  await t.test('recovers a dead supervisor without restaging or trusting a different listener', async () => {
-    const {recoveryPaths, ...beforeMigration} = state;
+  await t.test('doctor verifies an owned listener with an authenticated MCP initialize', async () => {
+    const doctor = (expected, extra) => run(process.execPath, [join(sourceNode, 'dist', 'cli.js'), 'doctor'], expected, extra);
+    assert.match(await doctor(0), /^HEALTHY\b/);
+    assert.match(await doctor(1, {INSTALL_FIXTURE_USER_TOKEN:'b'.repeat(32)}), /^AUTHENTICATED_PROBE_FAILED\b/);
+    const {envHash, ...beforeMigration} = state;
     await writeFile(manifest, JSON.stringify(beforeMigration));
-    assert.match(await invoke(['-Recover'], 1), /run -Restart once/i);
+    assert.match(await doctor(0), /^HEALTHY\b/);
     await writeFile(manifest, JSON.stringify(state));
-    await invoke(['-Recover']);
     assert.equal(JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, '')).pid, pid);
+  });
 
-    const spec = JSON.parse((await readFile(specPath, 'utf8')).replace(/^\uFEFF/, ''));
-    assert.match(spec.name, /^Redmine MCP Recovery \(S-1-/);
-    assert.match(spec.xml, /<Interval>PT1M<\/Interval>/);
-    assert.match(spec.xml, /<LogonTrigger>/);
-    assert.match(spec.xml, /<LogonType>InteractiveToken<\/LogonType>/);
-    assert.match(spec.xml, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/);
-    assert.match(spec.xml, /-WindowStyle Hidden.* -Recover<\/Arguments>/);
-    assert.doesNotMatch(JSON.stringify(spec), /fixture-key|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
-    const scheduledScript = join(dirname(manifest), 'recovery', 'install-local-service.ps1');
-    const scheduledEnv = {PATH:systemPath, REDMINE_CONFIG:undefined, REDMINE_MCP_STORAGE_ROOT:undefined, REDMINE_MCP_LOCAL_TOKEN:'b'.repeat(32), INSTALL_FIXTURE_NODE_MODULES:undefined};
+  await t.test('doctor repairs an identified supervisor that persistently returns 503', async () => {
+    const deployment = join(dirname(manifest), state.deployment);
+    await writeFile(join(deployment, '.fixture-unavailable-' + pid), '');
+    assert.equal((await initialize()).status, 503);
+    const doctor = (expected, extra) => run(process.execPath, [join(deployment, 'dist', 'cli.js'), 'doctor'], expected, extra);
+    assert.match(await doctor(1, {PYTHONPATH:join(root, 'different-python-path')}), /^ENVIRONMENT_CHANGED\b/);
+    assert.equal((await initialize()).status, 503);
+    assert.match(await doctor(0), /^RECOVERED\b/);
+    const restarted = JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, ''));
+    assert.notEqual(restarted.pid, pid);
+    pid = restarted.pid;
+    assert.equal(restarted.deployment, state.deployment);
+    assert.equal(restarted.port, port);
+    assert.equal((await initialize()).status, 200);
+    state = restarted;
+  });
+
+  await t.test('doctor repairs an identified supervisor that lost its listener', async () => {
+    const deployment = join(dirname(manifest), state.deployment);
+    await writeFile(join(deployment, '.fixture-close-' + pid), '');
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if (await initialize().then(() => false, () => true)) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    await assert.rejects(initialize());
+    process.kill(pid, 0);
+    assert.match(await run(process.execPath, [join(deployment, 'dist', 'cli.js'), 'doctor']), /^RECOVERED\b/);
+    const restarted = JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, ''));
+    assert.notEqual(restarted.pid, pid);
+    pid = restarted.pid;
+    assert.equal(restarted.deployment, state.deployment);
+    assert.equal((await initialize()).status, 200);
+    state = restarted;
+  });
+
+  await t.test('doctor restarts a dead supervisor in place after verifying the installed context', async () => {
+    const helper = join(dirname(manifest), 'doctor', 'doctor.ps1');
+    const windowsPowerShell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const doctorEnv = {PATH:systemPath, REDMINE_CONFIG:undefined, REDMINE_MCP_STORAGE_ROOT:undefined, REDMINE_MCP_LOCAL_TOKEN:'b'.repeat(32), INSTALL_FIXTURE_NODE_MODULES:undefined};
+    const doctor = (expected, extra) => run(windowsPowerShell, ['-NoProfile', '-File', helper], expected, {...doctorEnv, ...extra});
 
     process.kill(pid);
     const occupiedPort = createServer();
@@ -181,19 +245,25 @@ function npm.cmd {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
-    assert.match(await invoke(['-Recover'], 1, scheduledEnv, scheduledScript), /port.*occupied/i);
+    assert.match(await doctor(1), /^PORT_OCCUPIED\b/);
     assert.equal(reached, false);
     await new Promise(resolve => occupiedPort.close(resolve));
 
     await writeFile(manifest, JSON.stringify({...state, pid:process.pid, startedAt:'1'}));
-    assert.match(await invoke(['-Recover'], 1, scheduledEnv, scheduledScript), /PID identity/i);
+    assert.match(await doctor(1), /^PID_IDENTITY_MISMATCH\b/);
+    const {envHash, ...beforeMigration} = state;
+    await writeFile(manifest, JSON.stringify(beforeMigration));
+    assert.match(await doctor(1), /^LEGACY_MANIFEST\b.*-Restart/);
     await writeFile(manifest, JSON.stringify(state));
-    await invoke(['-Recover'], 1, {...scheduledEnv, INSTALL_FIXTURE_USER_TOKEN:undefined}, scheduledScript);
-    await invoke(['-Recover'], 1, {...scheduledEnv, PYTHONPATH:join(root, 'different-python-path')}, scheduledScript);
-    await writeFile(config, updatedFixture + '# unverified recovery configuration\n');
-    await invoke(['-Recover'], 1, scheduledEnv, scheduledScript);
+    assert.match(await doctor(1, {INSTALL_FIXTURE_USER_TOKEN:undefined}), /^TOKEN_UNAVAILABLE\b/);
+    assert.match(await doctor(1, {PYTHONPATH:join(root, 'different-python-path')}), /^ENVIRONMENT_CHANGED\b/);
+    await writeFile(config, updatedFixture + '# unverified configuration\n');
+    assert.match(await doctor(1), /^CONFIGURATION_CHANGED\b/);
     await writeFile(config, updatedFixture);
-    await invoke(['-Recover'], 0, scheduledEnv, scheduledScript);
+    const installedCli = join(dirname(manifest), state.deployment, 'dist', 'cli.js');
+    const output = await run(process.execPath, [installedCli, 'doctor'], 0, doctorEnv);
+    assert.match(output, /^RECOVERED\b/);
+    assert.doesNotMatch(output, /fixture-key|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/);
     const recovered = JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, ''));
     assert.notEqual(recovered.pid, pid);
     pid = recovered.pid;

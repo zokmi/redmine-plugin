@@ -1,41 +1,45 @@
 [CmdletBinding()]
-param([switch]$Restart, [switch]$Recover, [switch]$UseNode, [ValidateRange(1,65535)][int]$Port = 18765)
+param([switch]$Restart, [switch]$Doctor, [switch]$UseNode, [ValidateRange(1,65535)][int]$Port = 18765)
 $ErrorActionPreference = 'Stop'
-if ($Recover -and ($Restart -or $UseNode -or $PSBoundParameters.ContainsKey('Port'))) { throw '-Recover uses the installed engine and port; run it on its own.' }
+if ($Doctor -and ($Restart -or $UseNode -or $PSBoundParameters.ContainsKey('Port'))) { throw '-Doctor uses the installed engine and port; run it on its own.' }
 $serviceRoot = Join-Path $env:LOCALAPPDATA 'redmine-mcp/service'
 $statePath = Join-Path $serviceRoot 'active.json'
+if ($Doctor -and -not (Test-Path -LiteralPath $statePath -PathType Leaf)) { throw 'NOT_INSTALLED' }
 # A process-held exclusive handle serializes staging, stop and manifest publication.
 $null = New-Item -ItemType Directory -Path $serviceRoot -Force
 try { $installLock = [IO.File]::Open((Join-Path $serviceRoot 'install.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
-catch { throw 'Another service installation is in progress.' }
+catch { if ($Doctor) { throw 'SERVICE_BUSY' }; throw 'Another service installation is in progress.' }
 try {
 $old = $null
 if (Test-Path -LiteralPath $statePath -PathType Leaf) {
     # Windows PowerShell 5 otherwise reads a BOM-less PowerShell 7 manifest as ANSI.
-    $old = Get-Content -LiteralPath $statePath -Encoding UTF8 -Raw | ConvertFrom-Json
-    if ($old.deployment -cnotmatch '\A[a-f0-9]{32}\z' -or ($old.engine -and $old.engine -notin @('python','node'))) { throw 'Invalid active service manifest.' }
+    try {
+        $old = Get-Content -LiteralPath $statePath -Encoding UTF8 -Raw | ConvertFrom-Json
+        if ($old.deployment -cnotmatch '\A[a-f0-9]{32}\z' -or ($old.engine -and $old.engine -notin @('python','node'))) { throw 'Invalid active service manifest.' }
+    } catch { if ($Doctor) { throw 'INVALID_MANIFEST' }; throw }
 }
-if ($Recover) {
-    if (-not $old) { throw 'Install the local service once before using -Recover.' }
-    if (-not $old.envHash -or -not $old.contextSalt -or -not $old.engine -or -not $old.image -or -not $old.PSObject.Properties['recoveryPaths']) { throw 'Run -Restart once in the installed service environment before using -Recover.' }
-    $servicePort = 0
+if ($Doctor) {
+    if (-not $old) { throw 'NOT_INSTALLED' }
+    $servicePort = 18765
     $servicePid = 0
-    if (-not [int]::TryParse([string]$old.port, [ref]$servicePort) -or $servicePort -lt 1 -or $servicePort -gt 65535 -or
-        -not [int]::TryParse([string]$old.pid, [ref]$servicePid) -or $servicePid -lt 1) { throw 'Invalid active service manifest.' }
-    if (-not [IO.Path]::IsPathRooted([string]$old.image) -or -not (Test-Path -LiteralPath $old.image -PathType Leaf)) { throw 'Installed Node executable is unavailable.' }
-    $node = [string]$old.image
+    $serviceStart = [long]0
+    if (($null -ne $old.port -and (-not [int]::TryParse([string]$old.port, [ref]$servicePort) -or $servicePort -lt 1 -or $servicePort -gt 65535)) -or
+        -not [int]::TryParse([string]$old.pid, [ref]$servicePid) -or $servicePid -lt 1 -or
+        -not [long]::TryParse([string]$old.startedAt, [ref]$serviceStart) -or $serviceStart -lt 1) { throw 'INVALID_MANIFEST' }
+    $Port = $servicePort
+    $node = if ($old.image) { [string]$old.image } else { (Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
 } else { $node = (Get-Command node.exe -CommandType Application | Select-Object -First 1).Source }
 function Assert-NodeVersion {
     $version = & $node --version
     if ($version -notmatch '^v(\d+)\.' -or [int]$Matches[1] -lt 22) { throw 'Redmine MCP requires Node.js 22 or later.' }
 }
-if (-not $Recover) { Assert-NodeVersion }
+if (-not $Doctor) { Assert-NodeVersion }
 $tokenName = 'REDMINE_MCP_LOCAL_TOKEN'
 function Get-UserToken { return [Environment]::GetEnvironmentVariable($tokenName, 'User') }
 $token = Get-UserToken
 $originalUserToken = $token
 $persistToken = $false
-if ($Recover -and -not $token) { throw 'The installed user service token is unavailable.' }
+if ($Doctor -and $token -cnotmatch '\A[A-Za-z0-9_-]{32,}\z') { throw 'TOKEN_UNAVAILABLE' }
 if (-not $token) { $token = [Environment]::GetEnvironmentVariable($tokenName, 'Process'); if ($token -cmatch '\A[A-Za-z0-9_-]{32,}\z') { $persistToken = $true } }
 if (-not $token) {
     $bytes = New-Object byte[] 32; $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -44,7 +48,7 @@ if (-not $token) {
     $persistToken = $true
 }
 if ($token -cnotmatch '\A[A-Za-z0-9_-]{32,}\z') { throw "$tokenName must contain at least 32 URL-safe characters." }
-function Get-RecoveryPaths {
+function Get-ServicePaths {
     $paths = @{}
     foreach ($entry in Get-ChildItem Env:) {
         if ($entry.Name -in @('REDMINE_CONFIG','REDMINE_MCP_STORAGE_ROOT') -and $entry.Value) { $paths[$entry.Name] = $entry.Value }
@@ -102,7 +106,7 @@ function Listener-Owned([int]$port, [int]$pidValue, $listeners = @(Get-PortListe
     $loopback = @($listeners | Where-Object { $_ -match ('^\s*TCP\s+127\.0\.0\.1:' + $port + '\s') })
     return $loopback.Count -eq 1 -and $loopback[0] -match ('\s' + $pidValue + '\s*$')
 }
-function Test-Authorized([int]$port, [int]$pidValue, [ref]$startupPending) {
+function Test-Authorized([int]$port, [int]$pidValue, [ref]$startupPending, [ref]$upstreamUnavailable) {
     if (-not (Listener-Owned $port $pidValue)) {
         if ($startupPending) { $startupPending.Value = $true }
         return $false
@@ -126,15 +130,18 @@ function Test-Authorized([int]$port, [int]$pidValue, [ref]$startupPending) {
         return $valid
     } catch {
         # Retry only proxy failures that did not return an MCP session.
-        if ($startupPending -and $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -in @(502,503)) { $startupPending.Value = $true }
+        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -in @(502,503)) {
+            if ($startupPending) { $startupPending.Value = $true }
+            if ($upstreamUnavailable) { $upstreamUnavailable.Value = $true }
+        }
         return $false
     }
 }
 if ($Restart -and -not $old) { throw 'Install the local service once before using -Restart.' }
 if ($Restart -and $UseNode) { throw '-Restart uses the installed engine; omit -UseNode.' }
-if ($old -and -not $old.contextSalt -and -not $Restart) { throw 'Legacy deployment has no saved context; first restart the installed service to adopt its current environment.' }
+if (-not $Doctor -and $old -and -not $old.contextSalt -and -not $Restart) { throw 'Legacy deployment has no saved context; first restart the installed service to adopt its current environment.' }
 $oldConfigChanged = [bool]$old
-if (-not $Recover -and $old -and $old.contextSalt) {
+if (-not $Doctor -and $old -and $old.contextSalt) {
     if ($old.contextSalt -cnotmatch '\A[a-f0-9]{32}\z' -or $old.contextHash -cnotmatch '\A[a-f0-9]{64}\z') { throw 'Invalid service context fingerprint.' }
     $oldConfigChanged = (Context-Fingerprint $old.contextSalt $old $false (-not [bool]$old.envHash)) -cne $old.contextHash
     if ($old.envHash) {
@@ -143,9 +150,11 @@ if (-not $Recover -and $old -and $old.contextSalt) {
     } elseif ($oldConfigChanged) { throw 'Previous combined context fingerprint cannot be verified. Restore the running configuration and restart once to adopt the new format.' }
     if (-not $old.envHash -and (Resolve-ServiceConfig $old $true) -ine (Resolve-ServiceConfig $old)) { throw 'Previous combined fingerprint used a different configuration source; verify the running configuration before migrating.' }
 }
-if ($old -and -not $old.port) { $old | Add-Member -NotePropertyName port -NotePropertyValue 18765 }
-if ($old -and $old.port -and ($Restart -or -not $PSBoundParameters.ContainsKey('Port'))) { $Port = [int]$old.port }
-$reuseDeployment = $Restart -or $Recover
+if (-not $Doctor -and $old) {
+    if (-not $old.port) { $old | Add-Member -NotePropertyName port -NotePropertyValue 18765 }
+    if ($old.port -and ($Restart -or -not $PSBoundParameters.ContainsKey('Port'))) { $Port = [int]$old.port }
+}
+$reuseDeployment = $Restart -or $Doctor
 $engine = if ($reuseDeployment) { if ($old.engine) { $old.engine } else { 'python' } } elseif ($UseNode) { 'node' } else { 'python' }
 $id = if ($reuseDeployment) { $old.deployment } else { [Guid]::NewGuid().ToString('N') }
 $deployment = Join-Path $serviceRoot $id
@@ -215,7 +224,7 @@ function Start-ServiceDeployment($item, [ref]$processRef) {
                 if (Test-Authorized $Port $p.Id ([ref]$startupPending)) {
                     $salt = [Guid]::NewGuid().ToString('N')
                     if ($processRef) { $processRef.Value = $p }
-                    return @{ deployment=$item.deployment; engine=$item.engine; pid=$p.Id; startedAt=[string]$p.StartTime.ToUniversalTime().Ticks; image=$node; port=$Port; contextSalt=$salt; contextHash=(Context-Fingerprint $salt $item); envHash=(Context-Fingerprint $salt $item $true); recoveryPaths=(Get-RecoveryPaths) }
+                    return @{ deployment=$item.deployment; engine=$item.engine; pid=$p.Id; startedAt=[string]$p.StartTime.ToUniversalTime().Ticks; image=$node; port=$Port; contextSalt=$salt; contextHash=(Context-Fingerprint $salt $item); envHash=(Context-Fingerprint $salt $item $true); servicePaths=(Get-ServicePaths) }
                 }
                 if (-not $startupPending) { throw 'Service authenticated startup could not be verified.' }
             }
@@ -229,41 +238,69 @@ function Save-State($item) {
     $backup = $temp + '.bak'
     try { $item | ConvertTo-Json | Set-Content -LiteralPath $temp -Encoding UTF8; if (Test-Path -LiteralPath $statePath) { [IO.File]::Replace($temp, $statePath, $backup) } else { [IO.File]::Move($temp, $statePath) } } finally { Remove-Item -LiteralPath $temp, $backup -Force -ErrorAction SilentlyContinue }
 }
-function Assert-RecoveryContext($item) {
-    if ((Context-Fingerprint $item.contextSalt $item $true) -cne $item.envHash -or [string](Get-UserToken) -cne [string]$token) { throw 'Service recovery environment, configuration source or user token changed.' }
-    if ((Context-Fingerprint $item.contextSalt $item) -cne $item.contextHash) { throw 'Configuration changed; run -Restart to validate and adopt it.' }
+function Assert-DoctorContext($item) {
+    try { $identity = Context-Fingerprint $item.contextSalt $item $true } catch { throw 'ENVIRONMENT_CHANGED' }
+    if ($identity -cne $item.envHash -or [string](Get-UserToken) -cne [string]$token) { throw 'ENVIRONMENT_CHANGED' }
+    try { $context = Context-Fingerprint $item.contextSalt $item } catch { throw 'CONFIGURATION_CHANGED' }
+    if ($context -cne $item.contextHash) { throw 'CONFIGURATION_CHANGED' }
 }
-function Invoke-ServiceRecovery($item) {
-    if ($item.contextSalt -cnotmatch '\A[a-f0-9]{32}\z' -or $item.contextHash -cnotmatch '\A[a-f0-9]{64}\z' -or $item.envHash -cnotmatch '\A[a-f0-9]{64}\z') { throw 'Invalid service context fingerprint.' }
-    $process = Find-OwnedProcess $item
-    $listeners = @(Get-PortListeners $Port)
-    if ($process) {
-        if (-not (Listener-Owned $Port $process.Id $listeners)) { throw 'Installed service process does not own the configured listener.' }
-        Write-Output "Redmine MCP is already listening (PID $($process.Id))."
-        return
+function Get-DoctorListeners {
+    try { $listeners = @(Get-PortListeners $Port) } catch { throw 'PORT_CHECK_FAILED' }
+    return $listeners
+}
+function Test-DoctorHealth($process, [int]$attempts) {
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        $listeners = @(Get-DoctorListeners)
+        if (-not (Listener-Owned $Port $process.Id $listeners)) {
+            if ($listeners.Count) { throw 'PORT_OCCUPIED' }
+            return $false
+        }
+        $upstreamUnavailable = $false
+        if (Test-Authorized $Port $process.Id $null ([ref]$upstreamUnavailable)) { return $true }
+        if (-not $upstreamUnavailable) { throw 'AUTHENTICATED_PROBE_FAILED' }
+        if ($attempt -lt $attempts) { Start-Sleep -Milliseconds 1000 }
     }
-    if ($listeners.Count) { throw 'Service port is occupied by an unrecorded listener.' }
+    return $false
+}
+function Invoke-ServiceDoctor($item) {
+    try { $process = Find-OwnedProcess $item } catch { throw 'PID_IDENTITY_MISMATCH' }
+    if ($process) {
+        if (Test-DoctorHealth $process 3) { Write-Output 'HEALTHY'; return }
+    } elseif (@(Get-DoctorListeners).Count) { throw 'PORT_OCCUPIED' }
+    if (-not $item.envHash -or -not $item.contextSalt -or -not $item.engine -or -not $item.image) { throw 'LEGACY_MANIFEST' }
+    if ($item.contextSalt -cnotmatch '\A[a-f0-9]{32}\z' -or $item.contextHash -cnotmatch '\A[a-f0-9]{64}\z' -or $item.envHash -cnotmatch '\A[a-f0-9]{64}\z') { throw 'INVALID_MANIFEST' }
+    if (-not [IO.Path]::IsPathRooted($node) -or -not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'RUNTIME_UNAVAILABLE' }
 
     $restoredPaths = @()
     $launched = $null
     try {
-        # Task Scheduler may not inherit explicit paths set by the installation shell.
-        foreach ($path in $item.recoveryPaths.PSObject.Properties) {
+        # The caller may not inherit explicit paths set by the installation shell.
+        $savedPaths = if ($item.servicePaths) { $item.servicePaths } else { $item.recoveryPaths }
+        foreach ($path in $savedPaths.PSObject.Properties) {
             if ($path.Name -in @('REDMINE_CONFIG','REDMINE_MCP_STORAGE_ROOT') -and $path.Value -and $null -eq [Environment]::GetEnvironmentVariable($path.Name, 'Process')) {
                 [Environment]::SetEnvironmentVariable($path.Name, [string]$path.Value, 'Process')
                 $restoredPaths += $path.Name
             }
         }
-        Validate-Runtime $item
-        Assert-RecoveryContext $item
-        Assert-NodeVersion
-        Validate-Configuration $item
-        Validate-Storage $item
-        Assert-RecoveryContext $item
-        $recovered = Start-ServiceDeployment $item ([ref]$launched)
-        Assert-RecoveryContext $item
-        Save-State $recovered
-        Write-Output "Redmine MCP recovered (PID $($recovered.pid)). Logs: $deployment"
+        try { Validate-Runtime $item } catch { throw 'RUNTIME_UNAVAILABLE' }
+        Assert-DoctorContext $item
+        try { Assert-NodeVersion } catch { throw 'RUNTIME_UNAVAILABLE' }
+        try { Validate-Configuration $item } catch { throw 'CONFIGURATION_INVALID' }
+        try { Validate-Storage $item *> $null } catch { throw 'STORAGE_UNAVAILABLE' }
+        Assert-DoctorContext $item
+        if ($process) {
+            try { $process = Find-OwnedProcess $item } catch { throw 'PID_IDENTITY_MISMATCH' }
+            if ($process) {
+                if (Test-DoctorHealth $process 1) { Write-Output 'HEALTHY'; return }
+                Assert-DoctorContext $item
+                try { Stop-Process -InputObject $process; if (-not $process.WaitForExit(5000)) { throw 'STOP_FAILED' } } catch { throw 'STOP_FAILED' }
+            }
+        }
+        if (@(Get-DoctorListeners).Count) { throw 'PORT_OCCUPIED' }
+        try { $recovered = Start-ServiceDeployment $item ([ref]$launched) } catch { throw 'STARTUP_FAILED' }
+        Assert-DoctorContext $item
+        try { Save-State $recovered } catch { throw 'MANIFEST_UPDATE_FAILED' }
+        Write-Output 'RECOVERED'
     } catch {
         if ($launched -and -not $launched.HasExited) { $launched.Kill() }
         throw
@@ -271,12 +308,12 @@ function Invoke-ServiceRecovery($item) {
         foreach ($name in $restoredPaths) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
     }
 }
-function Register-ServiceRecovery {
-    $recoveryRoot = Join-Path $serviceRoot 'recovery'
-    $null = New-Item -ItemType Directory -Path $recoveryRoot -Force
-    foreach ($name in 'validate-service-config.mjs','validate-service-config.py','install-local-service.ps1') {
+function Install-DoctorHelper {
+    $doctorRoot = Join-Path $serviceRoot 'doctor'
+    $null = New-Item -ItemType Directory -Path $doctorRoot -Force
+    foreach ($name in 'validate-service-config.mjs','validate-service-config.py','install-local-service.ps1','doctor.ps1') {
         $source = Join-Path $PSScriptRoot $name
-        $target = Join-Path $recoveryRoot $name
+        $target = Join-Path $doctorRoot $name
         if ($source -ine $target) {
             $temp = $target + '.tmp'
             $backup = $target + '.bak'
@@ -286,41 +323,9 @@ function Register-ServiceRecovery {
             } finally { Remove-Item -LiteralPath $temp, $backup -ErrorAction SilentlyContinue }
         }
     }
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $start = (Get-Date).AddMinutes(1).ToString("yyyy-MM-dd'T'HH:mm:ss", [Globalization.CultureInfo]::InvariantCulture)
-    $command = [Security.SecurityElement]::Escape((Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))
-    $scriptPath = Join-Path $recoveryRoot 'install-local-service.ps1'
-    $arguments = [Security.SecurityElement]::Escape(('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Recover' -f $scriptPath))
-    $xml = @"
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <Triggers>
-    <TimeTrigger>
-      <Repetition><Interval>PT1M</Interval></Repetition>
-      <StartBoundary>$start</StartBoundary>
-    </TimeTrigger>
-    <LogonTrigger><UserId>$sid</UserId></LogonTrigger>
-  </Triggers>
-  <Principals>
-    <Principal id="CurrentUser">
-      <UserId>$sid</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel>
-    </Principal>
-  </Principals>
-  <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-    <StartWhenAvailable>true</StartWhenAvailable>
-    <ExecutionTimeLimit>PT3M</ExecutionTimeLimit>
-  </Settings>
-  <Actions Context="CurrentUser">
-    <Exec><Command>$command</Command><Arguments>$arguments</Arguments></Exec>
-  </Actions>
-</Task>
-"@
-    $null = Register-ScheduledTask -TaskName "Redmine MCP Recovery ($sid)" -Xml $xml -Force
 }
-if ($Recover) {
-    Invoke-ServiceRecovery $old
+if ($Doctor) {
+    Invoke-ServiceDoctor $old
     return
 }
 if (-not $Restart) {
@@ -381,6 +386,6 @@ try {
     if ($stopped) { try { if ($oldConfigChanged) { throw 'The previous running configuration was changed and is unavailable; the file was preserved and the previous service was not restored.' }; $expectedUserToken = if ($persisted) { $token } else { $originalUserToken }; if ((Context-Fingerprint $rollbackSalt $old) -cne $rollbackHash -or [string](Get-UserToken) -cne [string]$expectedUserToken) { throw 'Prior environment changed; automatic rollback is unsafe.' }; if ($old.port) { $Port = [int]$old.port }; $restored = Start-ServiceDeployment $old; Save-State $restored; Write-Warning 'Previous deployment restored.' } catch { throw "Startup failed and rollback failed: $failure; $_" } }
     throw $failure
 }
-try { Register-ServiceRecovery }
-catch { throw "The service is running, but registering its recovery task failed: $($_.Exception.Message)" }
+try { Install-DoctorHelper }
+catch { throw 'The service is running, but installing the doctor helper failed.' }
 } finally { $installLock.Dispose() }
