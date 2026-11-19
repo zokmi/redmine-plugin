@@ -1,6 +1,6 @@
 import { mock } from 'node:test';
 import assert from 'node:assert/strict';
-let directory = true, releases = 0, creating = true;
+let directory = true, releases = 0, creating = true, failCreate = false;
 const functions = {
   NtCreateFile(out, access, attributes) { assert.equal(attributes.SecurityDescriptor, creating ? 'owner-descriptor' : null); if (failCreate) throw new Error('injected creation failure'); out[0] = 'handle'; return 0; },
   GetFileInformationByHandle(h, info) { Object.assign(info,{attributes:directory ? 0x10 : 0, links:1}); return 1; },
