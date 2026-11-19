@@ -6,6 +6,7 @@ const k = process.platform === 'win32' ? koffi.load('kernel32.dll') : null;
 const free = k?.func('void * __stdcall LocalFree(void *)');
 const systemDirectory = k?.func('uint32 __stdcall GetSystemDirectoryW(_Out_ void *, uint32)');
 const descriptor = a?.func('int __stdcall ConvertStringSecurityDescriptorToSecurityDescriptorW(const char16_t *, uint32, _Out_ void **, void *)');
+const stringifySid = a?.func('int __stdcall ConvertSidToStringSidW(void *, _Out_ void **)');
 const stringify = a?.func('int __stdcall ConvertSecurityDescriptorToStringSecurityDescriptorW(void *, uint32, uint32, _Out_ void **, void *)');
 const securityInfo = a?.func('uint32 __stdcall GetSecurityInfo(void *, int, uint32, _Out_ void **, void *, _Out_ void **, void *, _Out_ void **)');
 const volumeInfo = k?.func('int __stdcall GetVolumeInformationByHandleW(void *, void *, uint32, void *, void *, _Out_ uint32 *, void *, uint32)');
@@ -36,10 +37,17 @@ export function verifyPrivateHandle(handle: unknown, requireProtected = false): 
       const sddl = koffi.decode.string16(out[0]);
       const match = /^O:([^:]+)D:([A-Z]*)(\(.*\))?$/.exec(sddl);
       const sid = currentSid();
-      if (!match || match[1] !== sid || !match[3] || (requireProtected && !match[2].includes('P'))) throw new Error('Unsafe owner or DACL');
+      const numericOwner: unknown[] = [null];
+      let ownerSid: string;
+      try {
+        if (!stringifySid?.(owner[0], numericOwner) || !numericOwner[0]) throw new Error('Cannot inspect owner SID');
+        ownerSid = koffi.decode.string16(numericOwner[0]);
+      } finally { if (numericOwner[0]) free?.(numericOwner[0]); }
+      if (!match || ownerSid !== sid || !match[3] || (requireProtected && !match[2].includes('P'))) throw new Error('Unsafe owner or DACL');
       const aces = match[3].match(/\([^()]*\)/g) ?? [];
       if (!aces.length || aces.join('') !== match[3]) throw new Error('Unsafe DACL');
-      const trusted = new Set([sid, 'SY', 'BA', 'S-1-5-18', 'S-1-5-32-544']);
+      // The serialized owner alias is trusted only after its actual SID matches this user.
+      const trusted = new Set([sid, match[1], 'SY', 'BA', 'S-1-5-18', 'S-1-5-32-544']);
       for (const ace of aces) {
         const fields = ace.slice(1, -1).split(';');
         if (fields.length !== 6 || (fields[0] !== 'A' && fields[0] !== 'D') || (fields[0] === 'A' && !trusted.has(fields[5])) ) throw new Error('Unsafe DACL principal or ACE');
