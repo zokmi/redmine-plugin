@@ -19,10 +19,18 @@ function currentSid(): string {
   if (!match) throw new Error('Cannot inspect process SID');
   return match[1];
 }
-export function privateDescriptor(): {descriptor: unknown, release: () => void} {
-  const out: unknown[] = [null], sid = currentSid();
-  if (!descriptor?.(`O:${sid}D:P(A;OICI;FA;;;${sid})`, 1, out, null) || !out[0]) throw new Error('Cannot create private security descriptor');
+function securityDescriptor(sddl: string): {descriptor: unknown, release: () => void} {
+  const out: unknown[] = [null];
+  if (!descriptor?.(sddl, 1, out, null) || !out[0]) throw new Error('Cannot create security descriptor');
   return {descriptor: out[0], release: () => { free?.(out[0]); }};
+}
+export function privateDescriptor(): {descriptor: unknown, release: () => void} {
+  const sid = currentSid();
+  return securityDescriptor(`O:${sid}D:P(A;OICI;FA;;;${sid})`);
+}
+/** Explicit user ownership while leaving the parent DACL inheritance unchanged. */
+export function ownerDescriptor(): {descriptor: unknown, release: () => void} {
+  return securityDescriptor(`O:${currentSid()}`);
 }
 /** Strict allow-list: owner, LOCAL SYSTEM and built-in Administrators only. */
 export function verifyPrivateHandle(handle: unknown, requireProtected = false): void {

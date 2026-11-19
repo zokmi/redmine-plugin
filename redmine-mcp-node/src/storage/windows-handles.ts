@@ -1,6 +1,6 @@
 import koffi from 'koffi';
 import path from 'node:path';
-import { privateDescriptor, verifyPrivateHandle } from './windows-acl.js';
+import { ownerDescriptor, privateDescriptor, verifyPrivateHandle } from './windows-acl.js';
 export { verifyPrivateHandle } from './windows-acl.js';
 const kernel = process.platform === 'win32' ? koffi.load('kernel32.dll') : null;
 const nt = process.platform === 'win32' ? koffi.load('ntdll.dll') : null;
@@ -96,9 +96,13 @@ function relative(parent: Handle, name: string, access: number, disposition: num
   const bytes = Buffer.from(name + '\0', 'utf16le');
   if (bytes.length > 65535) throw new Error('Component too long');
   const attrs = {Length:koffi.sizeof(ObjectAttributes), RootDirectory:parent, ObjectName:{Length:bytes.length - 2, MaximumLength:bytes.length, Buffer:bytes}, Attributes:0x40 | 0x1000, SecurityDescriptor:null, SecurityQualityOfService:null};
-  attrs.SecurityDescriptor = descriptor as null;
+  // Elevated tokens can default ownership to Administrators instead of the current user.
+  const inheritedOwner = descriptor === null && disposition !== 1 ? ownerDescriptor() : null;
+  attrs.SecurityDescriptor = (descriptor ?? inheritedOwner?.descriptor ?? null) as null;
   const output: unknown[] = [null];
-  const result = ntCreate(output, access | 0x100000 | 0x20000, attrs, {}, null, 0, share, disposition, 0x20 | 0x200000 | 0x4000 | (writeThrough ? 2 : 0) | (directory ? 1 : 0x40), null, 0);
+  let result: number;
+  try { result = ntCreate(output, access | 0x100000 | 0x20000, attrs, {}, null, 0, share, disposition, 0x20 | 0x200000 | 0x4000 | (writeThrough ? 2 : 0) | (directory ? 1 : 0x40), null, 0); }
+  finally { inheritedOwner?.release(); }
   if (result < 0 || !output[0]) throw new Error(`Cannot open entry (NTSTATUS ${result})`);
   const handle = output[0], details: {attributes?: number} = {};
   try {
