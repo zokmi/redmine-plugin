@@ -4,7 +4,15 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { once } from 'node:events';
-import { openDirectory, createPrivateDirectory, closeHandle } from '../dist/storage/windows-handles.js';
+import { openDirectory, createPrivateDirectory, openFile, writeHandle, closeHandle } from '../dist/storage/windows-handles.js';
+
+// Crash/upload fixtures must have the same user ownership as files created by the store.
+function writeOwnedFixture(file, data) {
+  const parent = openDirectory(dirname(file));
+  let handle;
+  try { handle = openFile(parent, basename(file), 'create'); writeHandle(handle, Buffer.from(data)); }
+  finally { if (handle) closeHandle(handle); closeHandle(parent); }
+}
 
 test('Windows store stages, publishes and borrows a Python-compatible item', { skip: process.platform !== 'win32' }, async () => {
   const { createWindowsAttachmentStore } = await import('../dist/storage/windows-store.js');
@@ -81,7 +89,7 @@ test('configured upload root enforces containment and private ACL', { skip: proc
   const base = await mkdtemp(join(tmpdir(), 'rm-upload-'));
   const parent = openDirectory(base); const cache = createPrivateDirectory(parent, 'cache'); const upload = createPrivateDirectory(parent, 'upload'); closeHandle(cache); closeHandle(upload); closeHandle(parent);
   try {
-    await writeFile(join(base,'upload','ok.txt'), 'okay'); await writeFile(join(base,'outside.txt'), 'no');
+    writeOwnedFixture(join(base,'upload','ok.txt'), 'okay'); await writeFile(join(base,'outside.txt'), 'no');
     const store = createWindowsAttachmentStore({root:join(base,'cache')});
     assert.equal(Buffer.from(await store.borrowSource(join(base,'upload','ok.txt'), 4, join(base,'upload'))).toString(), 'okay');
     await assert.rejects(store.borrowSource(join(base,'outside.txt'), 4, null));
@@ -161,7 +169,7 @@ test('sweep repairs published state, retains mismatched archives and expires ver
     now = new Date('2026-01-09T00:00:00Z'); await store.sweep();
     let record = JSON.parse(await readFile(recordPath)); const zip = await readFile(zipPath);
     // Simulate a crash after publishing the archive and before deleting the original.
-    record.state = 'archive_published'; await writeFile(recordPath,JSON.stringify(record)); await writeFile(original,'hello');
+    record.state = 'archive_published'; await writeFile(recordPath,JSON.stringify(record)); writeOwnedFixture(original,'hello');
     await writeFile(zipPath,'corrupt'); await store.sweep();
     assert.equal((await readFile(original)).toString(),'hello'); assert.equal(JSON.parse(await readFile(recordPath)).state,'archive_published');
     await writeFile(zipPath,zip); await writeFile(original,'changed'); await store.sweep();
@@ -212,7 +220,7 @@ test('sweep uses microsecond timestamps without premature archive or expiry', {s
     let rec = JSON.parse(await readFile(recordPath)); rec.last_used_at = '2026-01-01T00:00:00.000001+00:00'; await writeFile(recordPath,JSON.stringify(rec));
     now = new Date('2026-01-08T00:00:00Z'); await store.sweep(); assert.equal(JSON.parse(await readFile(recordPath)).state,'active');
     now = new Date('2026-01-08T00:00:00.001Z'); await store.sweep(); rec = JSON.parse(await readFile(recordPath)); assert.equal(rec.state,'archived');
-    rec.state = 'archive_published'; rec.archived_at = '2026-01-08T00:00:00.002001+00:00'; await writeFile(recordPath,JSON.stringify(rec)); await writeFile(original,'data');
+    rec.state = 'archive_published'; rec.archived_at = '2026-01-08T00:00:00.002001+00:00'; await writeFile(recordPath,JSON.stringify(rec)); writeOwnedFixture(original,'data');
     now = new Date('2026-01-08T00:00:00.002Z'); await store.sweep(); assert.equal((await readFile(original)).toString(),'data');
     now = new Date('2026-01-08T00:00:00.003Z'); await store.sweep(); await assert.rejects(readFile(original),{code:'ENOENT'}); rec = JSON.parse(await readFile(recordPath));
     rec.archived_at = '2026-01-08T00:00:00.001001+00:00'; await writeFile(recordPath,JSON.stringify(rec));

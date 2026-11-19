@@ -65,7 +65,9 @@ jobs:
         working-directory: redmine-mcp-node
         run: |
           npm ci --no-audit --no-fund
-          npm test
+          npm run build
+          # Native configuration edits and storage are Windows-only; the full suite runs above.
+          node --test tests/attachments.test.mjs tests/config.test.mjs tests/contracts.test.mjs tests/service.test.mjs tests/storage-record.test.mjs tests/storage-scheduler.test.mjs tests/storage-site-key.test.mjs tests/tools.test.mjs tests/transport.test.mjs
 
       - name: Check Node.js launcher syntax
         run: node --check scripts/local-service.mjs
