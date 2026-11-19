@@ -66,6 +66,16 @@ v0.18.0 提供可選用的 Windows Node 原生執行環境：以 `-UseNode` 執�
 
 Node CLI 也提供 `node '<套件絕對路徑>/dist/cli.js' doctor`。Doctor 會檢查部署紀錄、程序身分、監聽連接埠及 MCP 授權初始化。服務已健康時回報結果；確認已安裝服務停止且連接埠空閒時，自動啟動同一份服務並驗證。已登錄程序仍在，但未監聽或持續回應 502／503 時，doctor 會核對啟動身分及設定後重啟同一部署。遇到外部程序占用、PID 重用、權杖或設定不相容時，回報具體原因並結束。Agent 在成功後重新連線，以 `get_current_user` 驗證再接續任務。
 
+v0.18.3 起，安裝或成功重啟會以 Windows 目前使用者的 DPAPI 加密保存啟動環境。Doctor 在不同 PowerShell、Git Bash 或 agent 工作階段執行時，會暫時還原該環境，核對原有環境指紋及設定後恢復服務；結束時還原呼叫端的環境變數。使用者權杖、設定內容、程序身分與埠占用檢查仍然保留；快照無法解密或設定改變時不會強行重啟。
+
+0.18.2 以前的狀態檔只有雜湊，無法還原原環境。若服務已停止，且 doctor 回報 `ENVIRONMENT_CHANGED`，可明確採用目前終端機的環境：
+
+```powershell
+& '<已安裝 plugin 根目錄>/scripts/install-local-service.ps1' -Restart -AdoptEnvironment
+```
+
+此操作會驗證目前設定，僅允許已登錄的服務停止且埠空閒時執行，不會停止仍在執行的程序。先核對目前站台、設定來源及環境，再執行；之後的 doctor 可直接使用加密快照。快照僅可由同一 Windows 使用者解密。一般設定內容修改仍使用 `-Restart`。
+
 安裝及手動 `-Restart` 會保存固定的 doctor 入口與設定驗證腳本。已安裝舊版的使用者可在原有設定環境執行一次 `-Restart` 採用最新診斷功能。設定檔修改後同樣使用 `-Restart`，它會先驗證設定，並沿用原引擎。診斷引數與狀態檔不含明文權杖或 API 金鑰。
 
 舊版狀態檔沒有可驗證的環境指紋，不能直接用 `-UseNode` 升級；請先在與既有服務相同的設定環境中執行 `-Restart`，確認服務正常後再切換。舊版未記錄啟動時環境，因此首次採用無法證明環境完全相同。早期 Node 候選版使用混合指紋；若當時的設定已修改，請先恢復服務啟動時的設定並重啟一次，以採用新指紋格式。
@@ -84,7 +94,7 @@ uvx --python 3.13 --from '<已安裝 plugin 根目錄>/redmine-mcp' redmine-mcp 
 
 遇到連接埠占用時，先確認監聽程序的身分。切換或更新共用服務會中斷連線，請選擇兩個客戶端都沒有進行 Redmine 操作的時段。
 
-新版本發布後，透過 plugin 管理器更新 marketplace 與 plugin，重開工具載入新版本。發布前同步更新 `plugin.json`、`.claude-plugin/plugin.json`、`.codex-plugin/plugin.json` 與 `redmine-mcp/pyproject.toml` 的版本，避免舊版本快取。
+新版本發布後，透過 plugin 管理器更新 marketplace 與 plugin，重開工具載入新版本。發布前同步更新 `plugin.json`、`.claude-plugin/plugin.json`、`.codex-plugin/plugin.json` 、`redmine-mcp/pyproject.toml`、`redmine-mcp/uv.lock` 及 Node 套件與鎖檔的版本，避免舊版本快取。
 
 Claude Code 可在 `/plugin` 的 Installed 管理更新與移除；Codex 使用 plugin 管理介面，或 `codex plugin remove redmine@redmine-plugins`。若不再使用 Windows 共用服務，可停止服務程序。若不再使用 Redmine，可自行刪除上述參數檔。
 
@@ -97,7 +107,7 @@ git tag -a v0.14.2 -m "Redmine plugin v0.14.2"
 git push origin v0.14.2
 ```
 
-`vMAJOR.MINOR.PATCH` tag 會觸發 Release workflow：確認 tag 位於 `main`、四處版本一致、plugin 資源存在，通過相關測試後建立 GitHub Release 並自動產生發行說明。安裝仍透過 plugin marketplace；Release 不提供舊版獨立安裝包。範例版本請換成實際版本。
+`vMAJOR.MINOR.PATCH` tag 會觸發 Release workflow：確認 tag 位於 `main`、各套件與鎖檔版本一致、plugin 資源存在，通過 Windows 服務恢復及 Linux 的 Node／Python 測試後建立 GitHub Release 並自動產生發行說明。安裝仍透過 plugin marketplace；Release 不提供舊版獨立安裝包。範例版本請換成實際版本。
 
 若 tag 已推送但 Release 尚未建立，可在 Actions 手動執行 Release workflow，輸入既有 tag。
 

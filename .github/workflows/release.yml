@@ -21,7 +21,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  windows-service:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked Node dependencies
+        working-directory: redmine-mcp-node
+        run: npm ci --no-audit --no-fund
+      - name: Verify Windows service recovery on PowerShell 5.1 and 7
+        working-directory: redmine-mcp-node
+        run: |
+          $env:PSExecutionPolicyPreference = 'Bypass'
+          npm test
+
   release:
+    needs: windows-service
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -40,6 +60,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - name: Verify Node runtime
+        working-directory: redmine-mcp-node
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
 
       - name: Check Node.js launcher syntax
         run: node --check scripts/local-service.mjs

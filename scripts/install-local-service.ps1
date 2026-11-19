@@ -1,6 +1,7 @@
-[CmdletBinding()]
-param([switch]$Restart, [switch]$Doctor, [switch]$UseNode, [ValidateRange(1,65535)][int]$Port = 18765)
+﻿[CmdletBinding()]
+param([switch]$AdoptEnvironment, [switch]$Restart, [switch]$Doctor, [switch]$UseNode, [ValidateRange(1,65535)][int]$Port = 18765)
 $ErrorActionPreference = 'Stop'
+if ($AdoptEnvironment -and (-not $Restart -or $Doctor)) { throw '-AdoptEnvironment requires -Restart and cannot be used with -Doctor.' }
 if ($Doctor -and ($Restart -or $UseNode -or $PSBoundParameters.ContainsKey('Port'))) { throw '-Doctor uses the installed engine and port; run it on its own.' }
 $serviceRoot = Join-Path $env:LOCALAPPDATA 'redmine-mcp/service'
 $statePath = Join-Path $serviceRoot 'active.json'
@@ -113,10 +114,49 @@ function Resolve-ServiceConfig($item, [bool]$legacyCombined = $false) {
     }
     return [IO.Path]::GetFullPath($config)
 }
+function Get-ServiceEnvironmentNames {
+    @(Get-ChildItem Env: | Where-Object {
+        ($_.Name -like 'REDMINE_*' -and $_.Name -ne $tokenName) -or
+        $_.Name -in @('APPDATA','LOCALAPPDATA','USERPROFILE','HOME','HOMEDRIVE','HOMEPATH','XDG_CONFIG_HOME','PYTHONPATH','PYTHONHOME','NODE_OPTIONS','NODE_PATH','NODE_EXTRA_CA_CERTS','SSL_CERT_FILE','SSL_CERT_DIR','REQUESTS_CA_BUNDLE','CURL_CA_BUNDLE','HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','NO_PROXY')
+    } | ForEach-Object Name) | Sort-Object -Unique
+}
+function Protect-ServiceEnvironment {
+    # Agents launched from PowerShell 7 can pass its module path to Windows PowerShell 5.1.
+    Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
+    $values = @{}
+    foreach ($name in Get-ServiceEnvironmentNames) { $values[$name] = [string](Get-ProcessEnvironmentEntry $name).Value }
+    # Windows ConvertFrom-SecureString uses current-user DPAPI, never plaintext secrets.
+    ConvertFrom-SecureString (ConvertTo-SecureString ($values | ConvertTo-Json -Compress) -AsPlainText -Force)
+}
+function Enter-ServiceEnvironment([string]$encrypted) {
+    Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
+    $secure = ConvertTo-SecureString $encrypted
+    $credential = [pscredential]::new('snapshot', $secure)
+    $values = $credential.GetNetworkCredential().Password | ConvertFrom-Json
+    $previous = @{}
+    $names = @(@(Get-ServiceEnvironmentNames) + @($values.PSObject.Properties.Name) | Sort-Object -Unique)
+    foreach ($name in $names) {
+        if ($name -eq $tokenName -or ($name -notlike 'REDMINE_*' -and $name -notin @('APPDATA','LOCALAPPDATA','USERPROFILE','HOME','HOMEDRIVE','HOMEPATH','XDG_CONFIG_HOME','PYTHONPATH','PYTHONHOME','NODE_OPTIONS','NODE_PATH','NODE_EXTRA_CA_CERTS','SSL_CERT_FILE','SSL_CERT_DIR','REQUESTS_CA_BUNDLE','CURL_CA_BUNDLE','HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','NO_PROXY'))) { throw 'Invalid service environment snapshot.' }
+        $previous[$name] = Get-ProcessEnvironmentEntry $name
+    }
+    try {
+        foreach ($name in $names) {
+            $entry = $values.PSObject.Properties[$name]
+            if ($null -eq $entry) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+            else { Restore-ProcessEnvironmentVariable $name ([pscustomobject]@{Value=[string]$entry.Value}) }
+        }
+    } catch { Exit-ServiceEnvironment $previous; throw }
+    return $previous
+}
+function Exit-ServiceEnvironment($previous) {
+    foreach ($name in $previous.Keys) { Restore-ProcessEnvironmentVariable $name $previous[$name] }
+}
 function Context-Fingerprint([string]$salt, $item, [bool]$identityOnly = $false, [bool]$legacyCombined = $false) {
     $values = [ordered]@{ token = $token; node = $node }
     $names = @(Get-ChildItem Env: | Where-Object { ($_.Name -like 'REDMINE_*' -and $_.Name -ne $tokenName) -or $_.Name -in @('APPDATA','LOCALAPPDATA','USERPROFILE','HOME','HOMEDRIVE','HOMEPATH','XDG_CONFIG_HOME') -or (-not $legacyCombined -and $_.Name -in @('PYTHONPATH','PYTHONHOME','NODE_OPTIONS','NODE_PATH','NODE_EXTRA_CA_CERTS','SSL_CERT_FILE','SSL_CERT_DIR','REQUESTS_CA_BUNDLE','CURL_CA_BUNDLE','HTTPS_PROXY','HTTP_PROXY','ALL_PROXY','NO_PROXY')) } | ForEach-Object { $_.Name }) | Sort-Object -Unique
-    foreach ($name in $names) { $values[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+    foreach ($name in $names) {
+        $values[$name] = if ($item.contextVersion -eq 2) { [string](Get-ProcessEnvironmentEntry $name).Value } else { [Environment]::GetEnvironmentVariable($name, 'Process') }
+    }
     $config = Resolve-ServiceConfig $item $legacyCombined
     $values['configPath'] = $config
     if (-not $identityOnly -and (Test-Path -LiteralPath $config -PathType Leaf)) { $values['configBytes'] = [Convert]::ToBase64String([IO.File]::ReadAllBytes($config)) }
@@ -167,7 +207,7 @@ if ($Restart -and -not $old) { throw 'Install the local service once before usin
 if ($Restart -and $UseNode) { throw '-Restart uses the installed engine; omit -UseNode.' }
 if (-not $Doctor -and $old -and -not $old.contextSalt -and -not $Restart) { throw 'Legacy deployment has no saved context; first restart the installed service to adopt its current environment.' }
 $oldConfigChanged = [bool]$old
-if (-not $Doctor -and $old -and $old.contextSalt) {
+if (-not $Doctor -and -not $AdoptEnvironment -and $old -and $old.contextSalt) {
     if ($old.contextSalt -cnotmatch '\A[a-f0-9]{32}\z' -or $old.contextHash -cnotmatch '\A[a-f0-9]{64}\z') { throw 'Invalid service context fingerprint.' }
     $oldConfigChanged = (Context-Fingerprint $old.contextSalt $old $false (-not [bool]$old.envHash)) -cne $old.contextHash
     if ($old.envHash) {
@@ -227,6 +267,11 @@ function Find-OwnedProcess($item) {
     if ($p.Path -ne $expected -or [string]$p.StartTime.ToUniversalTime().Ticks -ne [string]$item.startedAt) { throw 'Active PID identity does not match manifest.' }
     return $p
 }
+if ($AdoptEnvironment) {
+    if (-not $old) { throw 'Install the local service before adopting an environment.' }
+    if (Find-OwnedProcess $old) { throw 'Environment adoption requires the recorded service to be stopped.' }
+    if (@(Get-PortListeners $Port).Count) { throw 'Environment adoption requires an unused service port.' }
+}
 function Stop-Owned($item) {
     $p = Find-OwnedProcess $item
     if (-not $p) { return $false }
@@ -264,7 +309,7 @@ function Start-ServiceDeployment($item, [ref]$processRef) {
                 if (Test-Authorized $Port $p.Id ([ref]$startupPending)) {
                     $salt = [Guid]::NewGuid().ToString('N')
                     if ($processRef) { $processRef.Value = $p }
-                    return @{ deployment=$item.deployment; engine=$item.engine; pid=$p.Id; startedAt=[string]$p.StartTime.ToUniversalTime().Ticks; image=$node; port=$Port; contextSalt=$salt; contextHash=(Context-Fingerprint $salt $item); envHash=(Context-Fingerprint $salt $item $true); servicePaths=(Get-ServicePaths) }
+                    return @{ deployment=$item.deployment; engine=$item.engine; pid=$p.Id; startedAt=[string]$p.StartTime.ToUniversalTime().Ticks; image=$node; port=$Port; contextSalt=$salt; contextHash=(Context-Fingerprint $salt $item); envHash=(Context-Fingerprint $salt $item $true); servicePaths=(Get-ServicePaths); contextVersion=$item.contextVersion; environmentSnapshot=(Protect-ServiceEnvironment) }
                 }
                 if (-not $startupPending) { throw 'Service authenticated startup could not be verified.' }
             }
@@ -318,8 +363,12 @@ function Invoke-ServiceDoctor($item) {
     if (-not [IO.Path]::IsPathRooted($node) -or -not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'RUNTIME_UNAVAILABLE' }
 
     $restoredPaths = @()
+    $previousEnvironment = $null
     $launched = $null
     try {
+        if ($item.environmentSnapshot) {
+            try { $previousEnvironment = Enter-ServiceEnvironment $item.environmentSnapshot } catch { throw 'ENVIRONMENT_CHANGED' }
+        }
         # The caller may not inherit explicit paths set by the installation shell.
         $savedPaths = if ($item.servicePaths) { $item.servicePaths } else { $item.recoveryPaths }
         foreach ($path in $savedPaths.PSObject.Properties) {
@@ -352,6 +401,7 @@ function Invoke-ServiceDoctor($item) {
         throw
     } finally {
         foreach ($name in $restoredPaths) { Restore-ProcessEnvironmentVariable $name $null }
+        if ($null -ne $previousEnvironment) { Exit-ServiceEnvironment $previousEnvironment }
     }
 }
 function Install-DoctorHelper {
@@ -393,7 +443,7 @@ if (-not $Restart) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'local-service.mjs') -Destination $deployment
     }
 }
-$item = @{ deployment=$id; engine=$engine }
+$item = @{ deployment=$id; engine=$engine; contextVersion=2 }
 Validate-Runtime $item
 Validate-Storage $item
 if ($old) { if (-not $old.engine) { $old | Add-Member -NotePropertyName engine -NotePropertyValue 'python' }; Validate-Runtime $old }
@@ -401,9 +451,9 @@ $stopped = $false; $started = $null; $persisted = $false
 try {
     $currentUserToken = Get-UserToken
     if ([string]$currentUserToken -cne [string]$originalUserToken) { throw 'User service token changed; refusing to stop the existing deployment.' }
-    if ($old -and $old.contextSalt -and $old.envHash -and (Context-Fingerprint $old.contextSalt $old $true) -cne $old.envHash) { throw 'Service environment changed while preparing the deployment.' }
-    if ($old -and $old.contextSalt -and -not $old.envHash -and (Context-Fingerprint $old.contextSalt $old $false $true) -cne $old.contextHash) { throw 'Previous combined context fingerprint cannot be verified.' }
-    if ($old -and $old.contextSalt) {
+    if (-not $AdoptEnvironment -and $old -and $old.contextSalt -and $old.envHash -and (Context-Fingerprint $old.contextSalt $old $true) -cne $old.envHash) { throw 'Service environment changed while preparing the deployment.' }
+    if (-not $AdoptEnvironment -and $old -and $old.contextSalt -and -not $old.envHash -and (Context-Fingerprint $old.contextSalt $old $false $true) -cne $old.contextHash) { throw 'Previous combined context fingerprint cannot be verified.' }
+    if (-not $AdoptEnvironment -and $old -and $old.contextSalt) {
         $oldConfigChanged = (Context-Fingerprint $old.contextSalt $old $false (-not [bool]$old.envHash)) -cne $old.contextHash
         if ($oldConfigChanged -and -not $Restart) { throw 'Configuration changed during staging; restart the existing deployment before upgrading.' }
     }
@@ -415,7 +465,7 @@ try {
     if ((Context-Fingerprint $candidateSalt $item) -cne $candidateHash) { throw 'Configuration changed during validation; existing service was not stopped.' }
     if ($old -and (Context-Fingerprint $rollbackSalt $old) -cne $rollbackHash) { throw 'Previous service configuration changed during validation; existing service was not stopped.' }
     if ($old -and -not $Restart -and (Resolve-ServiceConfig $old) -ine (Resolve-ServiceConfig $item)) { throw 'Configuration source differs between deployments; explicit migration is required before upgrading. Existing service was not stopped.' }
-    if ($old -and $old.contextSalt) {
+    if (-not $AdoptEnvironment -and $old -and $old.contextSalt) {
         $oldConfigChanged = (Context-Fingerprint $old.contextSalt $old $false (-not [bool]$old.envHash)) -cne $old.contextHash
         if ($oldConfigChanged -and (-not $Restart -or -not $old.envHash)) { throw 'Previous configuration changed during validation; existing service was not stopped.' }
     }

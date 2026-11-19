@@ -213,9 +213,7 @@ function npm.cmd {
     await writeFile(join(deployment, '.fixture-unavailable-' + pid), '');
     assert.equal((await initialize()).status, 503);
     const doctor = (expected, extra) => run(process.execPath, [join(deployment, 'dist', 'cli.js'), 'doctor'], expected, extra);
-    assert.match(await doctor(1, {PYTHONPATH:join(root, 'different-python-path')}), /^ENVIRONMENT_CHANGED\b/);
-    assert.equal((await initialize()).status, 503);
-    assert.match(await doctor(0), /^RECOVERED\b/);
+    assert.match(await doctor(0, {HOME:join(root, 'other-shell'), PYTHONPATH:join(root, 'different-python-path')}), /^RECOVERED\b/);
     const restarted = JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, ''));
     assert.notEqual(restarted.pid, pid);
     pid = restarted.pid;
@@ -246,7 +244,7 @@ function npm.cmd {
   await t.test('doctor restarts a dead supervisor in place after verifying the installed context', async () => {
     const helper = join(dirname(manifest), 'doctor', 'doctor.ps1');
     const windowsPowerShell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-    const doctorEnv = {PATH:systemPath, REDMINE_CONFIG:undefined, REDMINE_MCP_STORAGE_ROOT:undefined, REDMINE_MCP_LOCAL_TOKEN:'b'.repeat(32), INSTALL_FIXTURE_NODE_MODULES:undefined};
+    const doctorEnv = {HOME:join(root, 'other-shell'), PATH:systemPath, REDMINE_CONFIG:undefined, REDMINE_MCP_STORAGE_ROOT:undefined, REDMINE_MCP_LOCAL_TOKEN:'b'.repeat(32), INSTALL_FIXTURE_NODE_MODULES:undefined};
     const doctor = (expected, extra) => run(windowsPowerShell, ['-NoProfile', '-File', helper], expected, {...doctorEnv, ...extra});
 
     process.kill(pid);
@@ -275,7 +273,12 @@ function npm.cmd {
     assert.match(await doctor(1), /^LEGACY_MANIFEST\b.*-Restart/);
     await writeFile(manifest, JSON.stringify(state));
     assert.match(await doctor(1, {INSTALL_FIXTURE_USER_TOKEN:undefined}), /^TOKEN_UNAVAILABLE\b/);
+    const {environmentSnapshot, ...withoutSnapshot} = state;
+    await writeFile(manifest, JSON.stringify(withoutSnapshot));
     assert.match(await doctor(1, {PYTHONPATH:join(root, 'different-python-path')}), /^ENVIRONMENT_CHANGED\b/);
+    await writeFile(manifest, JSON.stringify({...state, environmentSnapshot:'invalid ciphertext'}));
+    assert.match(await doctor(1), /^ENVIRONMENT_CHANGED\b/);
+    await writeFile(manifest, JSON.stringify(state));
     await writeFile(config, updatedFixture + '# unverified configuration\n');
     assert.match(await doctor(1), /^CONFIGURATION_CHANGED\b/);
     await writeFile(config, updatedFixture);
@@ -293,10 +296,36 @@ function npm.cmd {
     assert.equal((await initialize()).status, 200);
     state = recovered;
   });
+  await invoke(['-Restart', '-AdoptEnvironment'], 1);
+  assert.match(await readFile(join(root, 'installer.log'), 'utf8'), /requires the recorded service to be stopped/i);
+  assert.equal((await initialize()).status, 200);
   const laterFixture = updatedFixture.replace('sites.changed', 'sites.later');
   await writeFile(config, laterFixture);
   await invoke(['-Restart'], 1, {INSTALL_FIXTURE_FAIL:'1'});
   assert.match(await readFile(join(root, 'installer.log'), 'utf8'), /previous service was not restored/i);
   assert.equal(await readFile(config, 'utf8'), laterFixture);
   await assert.rejects(fetch(`http://127.0.0.1:${port}/mcp`));
+  await invoke(['-Restart', '-AdoptEnvironment'], 0, {HOME:join(root, 'adopted-shell')});
+  state = JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, ''));
+  pid = state.pid;
+  assert.ok(state.environmentSnapshot);
+  assert.equal((await initialize()).status, 200);
 });
+
+for (const shell of ['pwsh.exe', 'powershell.exe']) {
+  test(`${shell} restores encrypted launch context across shells and preserves guards`, {skip:process.platform !== 'win32'}, () => {
+    execFileSync(shell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', resolve('tests/fixtures/installer-recovery.ps1'), sourceScript], {encoding:'utf8'});
+  });
+}
+
+for (const [writer, reader] of [['pwsh.exe', 'powershell.exe'], ['powershell.exe', 'pwsh.exe']]) {
+  test(`encrypted snapshot fingerprints survive ${writer} to ${reader} including empty values`, {skip:process.platform !== 'win32'}, async t => {
+    const root = await mkdtemp(join(tmpdir(), 'redmine-snapshot-'));
+    t.after(() => rm(root, {recursive:true, force:true}));
+    const snapshot = join(root, 'snapshot.json');
+    const fixture = resolve('tests/fixtures/installer-snapshot.ps1');
+    for (const [shell, mode] of [[writer, 'write'], [reader, 'read']]) {
+      execFileSync(shell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', fixture, sourceScript, mode, snapshot], {encoding:'utf8'});
+    }
+  });
+}
