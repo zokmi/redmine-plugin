@@ -69,7 +69,11 @@ export function tryLock(parent: Handle, name: string): Handle | null {
   if (bytes.length > 65535) throw new Error('Lock name too long');
   const attrs = {Length:koffi.sizeof(ObjectAttributes), RootDirectory:parent, ObjectName:{Length:bytes.length - 2, MaximumLength:bytes.length, Buffer:bytes}, Attributes:0x40 | 0x1000, SecurityDescriptor:null, SecurityQualityOfService:null};
   const output: unknown[] = [null]; const io = {};
-  const result = ntCreate(output, 0xc0120000, attrs, io, null, 0, 3, 3, 0x20 | 0x200000 | 0x4000 | 0x40, null, 0);
+  const owner = ownerDescriptor();
+  attrs.SecurityDescriptor = owner.descriptor as null;
+  let result: number;
+  try { result = ntCreate(output, 0xc0120000, attrs, io, null, 0, 3, 3, 0x20 | 0x200000 | 0x4000 | 0x40, null, 0); }
+  finally { owner.release(); }
   if (result < 0 || !output[0]) throw new Error(`Cannot open lock (NTSTATUS ${result})`);
   const handle = output[0];
   try { verifyRegularFile(handle); } catch (error) { closeHandle(handle); throw error; }

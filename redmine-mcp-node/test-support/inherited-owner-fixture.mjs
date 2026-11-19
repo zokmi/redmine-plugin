@@ -20,10 +20,11 @@ directory = false;
 native.openFile('parent','file','create');
 native.openFile('parent','lock','openOrCreate');
 native.openDurableFile('parent','durable','create');
+native.tryLock('parent','item.lock');
 creating = false;
 native.openFile('parent','existing','open');
-assert.equal(releases,4);
+assert.equal(releases,5);
 
 creating = true; failCreate = true;
 assert.throws(() => native.openFile('parent','failed','create'), /injected creation failure/);
-assert.equal(releases,5);
+assert.equal(releases,6);

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, symlink, rm } from 'node:fs/promises';
@@ -123,6 +124,7 @@ test('private managed root rejects permissive ACL and protects inherited entries
   let managed, child, file, permissive;
   try {
     permissive = createDirectory(parent, 'permissive');
+    execFileSync(join(process.env.SystemRoot, 'System32', 'icacls.exe'), [join(root, 'permissive'), '/grant', '*S-1-1-0:(OI)(CI)F'], {stdio:'ignore'});
     assert.throws(() => verifyPrivateHandle(permissive), /Unsafe owner or DACL|Unsafe DACL principal/);
     managed = createPrivateDirectory(parent, 'managed');
     verifyPrivateHandle(managed);
