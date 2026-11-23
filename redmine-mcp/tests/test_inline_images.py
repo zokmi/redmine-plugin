@@ -160,6 +160,7 @@ async def test_create_issue_送出的內文帶圖片引用(registry):
             "subject": "含圖片",
             "due_date": "2026-09-30",
             "description": f"{VALID_DESCRIPTION}\n\n## 佐證\n\n登入失敗的畫面",
+            "assigned_to_id": 9,
             "uploads": [PNG],
         },
     )

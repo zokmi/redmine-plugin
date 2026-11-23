@@ -47,23 +47,31 @@ async def test_create_issue_送出正確的_payload(registry):
     issue = seen["body"]["issue"]
     assert issue["project_id"] == "crm"
     assert issue["subject"] == "新單"
+    assert issue["assigned_to_id"] == 9
     assert issue["custom_fields"] == [{"id": 5, "value": "A001"}]
     assert result["id"] == 88
 
 
-async def test_create_issue_未給的欄位不出現在_payload(registry):
+async def test_create_issue_預設指派給指定站台的當前帳號(make_registry):
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.url.path == "/users/current.json"
+            return json_response(200, {"user": {"id": 27}})
         seen["body"] = json.loads(request.content)
-        return json_response(201, {"issue": {"id": 1}})
+        return json_response(201, {"issue": {"id": 1, "assigned_to": {"id": 27}}})
 
-    sites = registry(handler)
+    def unexpected_site(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("不應呼叫其他站台")
+
+    sites = make_registry({"alpha": unexpected_site, "beta": handler})
     mcp = create_server(sites)
-    await _call(
+    result = await _call(
         mcp,
         "create_issue",
         {
+            "site": "beta",
             "project_id": "crm",
             "subject": "只有必填",
             "due_date": "2026-09-30",
@@ -73,10 +81,36 @@ async def test_create_issue_未給的欄位不出現在_payload(registry):
     await sites.aclose()
 
     issue = seen["body"]["issue"]
-    assert "assigned_to_id" not in issue
+    assert issue.get("assigned_to_id") == 27
+    assert "assigned_to_id" in result["verified"]["applied"]
     assert "custom_fields" not in issue
-    # description 已是必填，必然出現；這裡確認的是「其餘選填欄位不會被補預設值」。
     assert issue["description"] == VALID_DESCRIPTION
+
+
+@pytest.mark.parametrize("status, user", [(401, {}), (200, {}), (200, {"id": 0})])
+async def test_create_issue_無法確認當前帳號時不建單(registry, status, user):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        return json_response(status, {"user": user})
+
+    sites = registry(handler)
+    mcp = create_server(sites)
+    with pytest.raises(Exception):
+        await _call(
+            mcp,
+            "create_issue",
+            {
+                "project_id": "crm",
+                "subject": "新單",
+                "due_date": "2026-09-30",
+                "description": VALID_DESCRIPTION,
+            },
+        )
+    await sites.aclose()
+
+    assert calls == [("GET", "/users/current.json")]
 
 
 async def test_create_issue_空白subject被拒絕(registry):
@@ -246,6 +280,7 @@ async def test_422_錯誤訊息帶到工具層(registry):
                 "subject": "x",
                 "due_date": "2026-09-30",
                 "description": VALID_DESCRIPTION,
+                "assigned_to_id": 9,
             },
         )
     await sites.aclose()
@@ -339,6 +374,7 @@ async def test_寫入只送到指定的站台(make_registry):
             "subject": "s",
             "due_date": "2026-09-30",
             "description": VALID_DESCRIPTION,
+            "assigned_to_id": 9,
         },
     )
     await sites.aclose()
@@ -358,6 +394,7 @@ async def test_單站台時可省略站台(registry):
             "subject": "s",
             "due_date": "2026-09-30",
             "description": VALID_DESCRIPTION,
+            "assigned_to_id": 9,
         },
     )
     await sites.aclose()
@@ -704,6 +741,7 @@ async def test_create_issue_內含h3字樣的正常內文不被誤擋(registry):
             "subject": "s",
             "due_date": "2026-09-30",
             "description": "### 問題描述\n\n舊版模板用的 h3. 標題已全部換掉，改用 Markdown。",
+            "assigned_to_id": 9,
         },
     )
     await sites.aclose()
@@ -930,6 +968,7 @@ async def test_create_issue_建立結果與送出不符時回報(registry):
                     description=VALID_DESCRIPTION,
                     due_date="2026-09-30",
                     tracker={"id": 1, "name": "臭蟲"},
+                    assigned_to={"id": 9},
                 )
             },
         )
@@ -945,6 +984,7 @@ async def test_create_issue_建立結果與送出不符時回報(registry):
             "due_date": "2026-09-30",
             "description": VALID_DESCRIPTION,
             "tracker_id": 7,
+            "assigned_to_id": 9,
         },
     )
     await sites.aclose()
@@ -972,6 +1012,7 @@ async def test_create_issue_檢核不額外送出請求(registry):
             "subject": "新單",
             "due_date": "2026-09-30",
             "description": VALID_DESCRIPTION,
+            "assigned_to_id": 9,
         },
     )
     await sites.aclose()
@@ -992,6 +1033,7 @@ async def test_create_issue_專案以識別名送出時不誤報(registry):
                     description=VALID_DESCRIPTION,
                     due_date="2026-09-30",
                     project={"id": 33, "name": "銷控", "identifier": "crm"},
+                    assigned_to={"id": 9},
                 )
             },
         )
@@ -1006,6 +1048,7 @@ async def test_create_issue_專案以識別名送出時不誤報(registry):
             "subject": "新單",
             "due_date": "2026-09-30",
             "description": VALID_DESCRIPTION,
+            "assigned_to_id": 9,
         },
     )
     await sites.aclose()
@@ -1027,6 +1070,7 @@ async def test_建單回傳提示後段落點(registry):
             "subject": "新單",
             "due_date": "2026-09-30",
             "description": VALID_DESCRIPTION,
+            "assigned_to_id": 9,
         },
     )
     await sites.aclose()
@@ -1075,6 +1119,7 @@ async def test_建單提示交代新需求走更新概述(registry):
             "subject": "新單",
             "due_date": "2026-09-30",
             "description": VALID_DESCRIPTION,
+            "assigned_to_id": 9,
         },
     )
     await sites.aclose()
@@ -1104,6 +1149,7 @@ async def test_create_issue_回傳的_subject_包上不可信圍籬(registry):
             "subject": "新單",
             "due_date": "2026-09-30",
             "description": VALID_DESCRIPTION,
+            "assigned_to_id": 9,
         },
     )
     await sites.aclose()

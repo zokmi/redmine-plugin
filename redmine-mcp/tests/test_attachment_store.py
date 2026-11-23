@@ -124,7 +124,7 @@ def test_borrow_managed_holds_lock_and_refreshes_usage(tmp_path: Path) -> None:
         assert acquired
 
 
-def test_borrow_rejects_locked_managed_source_and_oversized_external(tmp_path: Path) -> None:
+def test_borrow_rejects_locked_source_oversized_file_and_directory(tmp_path: Path) -> None:
     store = make_store(tmp_path / "managed")
     with store.begin_download(URL, "done.bin") as pending:
         pending.path.write_bytes(b"complete")
@@ -136,8 +136,8 @@ def test_borrow_rejects_locked_managed_source_and_oversized_external(tmp_path: P
     with pytest.raises(ValueError):
         with store.borrow_source(final, 7):
             pass
-    with pytest.raises(ValueError, match="允許的上傳路徑"):
-        with store.borrow_source(tmp_path, 7):
+    with pytest.raises(OSError):
+        with store.borrow_source(tmp_path, 7, upload_root=tmp_path.parent):
             pass
 
 

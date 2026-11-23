@@ -28,7 +28,7 @@ _BASE_INSTRUCTIONS = (
     "驗證截圖提供或上傳前，依 skill 交唯讀子代理實際看圖、逐條核對說明；全部 PASS 才放行。"
     "附件用 upload_attachment：file_path 限受管理附件或該站允許的上傳目錄；"
     "對話附件僅在主程式實際提供可讀本機路徑時可用，"
-    "否則請取得路徑或使用 content_base64。"
+    "否則請取得路徑。只有圖片內容時可用 content_base64 上傳。"
     "取得 token 後以 uploads 帶入寫入工具，每筆帶回傳的 filename，圖片會自動嵌入。\n"
 )
 

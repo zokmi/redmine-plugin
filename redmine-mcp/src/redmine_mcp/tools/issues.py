@@ -644,7 +644,10 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
         priority_id: Annotated[
             int | None, Field(description="優先權 id，可先用 list_priorities 查詢。")
         ] = None,
-        assigned_to_id: Annotated[int | None, Field(description="負責人 user id。")] = None,
+        assigned_to_id: Annotated[
+            int | None,
+            Field(description="負責人 user id，省略時指派給目標站台 API key 對應的當前帳號。"),
+        ] = None,
         parent_issue_id: Annotated[
             int | None,
             Field(description="父單編號。新功能開發的 UI／API／DB 子單以此指向母單。"),
@@ -685,7 +688,7 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
             tracker_id: 追蹤標籤 id，名稱先用 list_trackers 換成該站的 id。
             status_id: 狀態 id，可先用 list_issue_statuses 查詢。
             priority_id: 優先權 id，可先用 list_priorities 查詢。
-            assigned_to_id: 負責人 user id。
+            assigned_to_id: 負責人 user id；省略時指派給目標站台的當前帳號。
             parent_issue_id: 父單編號。
             start_date: 開始日期，格式 YYYY-MM-DD。
             custom_fields: 自訂欄位，key 為欄位 id 字串、value 為欄位值。
@@ -711,6 +714,12 @@ def register(mcp: Any, sites: SiteRegistry) -> None:
         if attached:
             payload["uploads"] = attached
         _embed_uploaded_images(payload, attached)
+        if assigned_to_id is None:
+            current_user = (await client.get("/users/current.json")).get("user")
+            current_user_id = current_user.get("id") if isinstance(current_user, dict) else None
+            if type(current_user_id) is not int or current_user_id <= 0:
+                raise RedmineError("Redmine 未回傳有效的當前帳號 ID，無法指派負責人")
+            payload["assigned_to_id"] = current_user_id
         raw = await client.post("/issues.json", {"issue": payload})
         created = raw.get("issue") or {}
         # 建立的回應本身就帶回落地後的 issue，直接拿來比對，不必多發一次 GET。

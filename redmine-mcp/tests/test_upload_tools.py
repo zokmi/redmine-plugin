@@ -168,6 +168,7 @@ async def test_create_issue_帶uploads(registry):
             "subject": "含圖片",
             "due_date": "2026-09-30",
             "description": "測試用內文，長度足以通過內容檢核。",
+            "assigned_to_id": 9,
             "uploads": [
                 {"token": "7167.abc", "filename": "a.png", "content_type": "image/png"}
             ],
