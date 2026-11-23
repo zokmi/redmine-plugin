@@ -64,6 +64,14 @@ export function registerIssues(tools: ToolRegistry, sites: SiteRegistry, timeout
     if (!fields.subject.trim()) throw new ToolError('subject 不可為空白');
     const issue = issuePayload(fields);
     const attached = attachUploads(issue, uploads);
+    if (fields.assigned_to_id == null) {
+      const { user } = await requestObject(target, 'GET', '/users/current.json', { signal });
+      const id = object(user).id;
+      if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) {
+        throw new ToolError('Redmine 未回傳有效的當前帳號 ID，無法指派負責人');
+      }
+      issue.assigned_to_id = id;
+    }
     const raw = await requestObject(target, 'POST', '/issues.json', { signal, body: { issue } });
     const created = object(raw.issue);
     const verified = verifyPayload(issue, created);

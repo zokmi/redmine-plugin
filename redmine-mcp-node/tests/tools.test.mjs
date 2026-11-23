@@ -190,7 +190,7 @@ test('issue writes preserve validation and payload', async (t) => {
   const client = await connect(t, ['north'], (site, method, path, { body }) => {
     calls.push({ site, method, path, body });
     if (method === 'POST') return ok({ issue: {
-      id: 11, project: { id: 2, identifier: 'demo' }, subject: '<edited>',
+      id: 11, project: { id: 2, identifier: 'demo' }, subject: '<edited>', assigned_to: { id: 9 },
       due_date: body.issue.due_date, description: body.issue.description.replaceAll('\n', '\r\n'),
       custom_fields: [{ id: 4, value: '7' }],
     } });
@@ -213,17 +213,18 @@ test('issue writes preserve validation and payload', async (t) => {
   assert.deepEqual(calls, []);
   const description = '## 佐證\n內文內含足夠的驗證資料\n\n## 下一節\n請勿移除';
   const created = await call(client, 'create_issue', {
-    ...baselineIssue, description, ignored_argument: 'ignored', custom_fields: { '4': 7 },
+    ...baselineIssue, description, assigned_to_id: 9, ignored_argument: 'ignored', custom_fields: { '4': 7 },
     uploads: [{ token: ' ab ', filename: 'a b.png', description: '' }],
   });
   assert.deepEqual(calls[0], { site: 'north', method: 'POST', path: '/issues.json', body: { issue: {
     ...baselineIssue,
+    assigned_to_id: 9,
     description: '## 佐證\n內文內含足夠的驗證資料\n\n![](<a b.png>)\n\n## 下一節\n請勿移除',
     custom_fields: [{ id: 4, value: 7 }],
     uploads: [{ token: 'ab', filename: 'a b.png' }],
   } } });
   assert.deepEqual(created.verified, {
-    applied: ['custom_fields', 'description', 'due_date', 'project_id'],
+    applied: ['assigned_to_id', 'custom_fields', 'description', 'due_date', 'project_id'],
     ignored: [{ field: 'subject', sent: wrapped(baselineIssue.subject), actual: wrapped('&lt;edited&gt;') }],
     unchecked: ['uploads'],
   });
@@ -247,6 +248,34 @@ test('issue writes preserve validation and payload', async (t) => {
   assert.equal(calls[4].body.issue.notes, '見 `x.png`。\n\n![](x.png)');
   assert.equal(calls[4].body.issue.private_notes, true);
   assert.deepEqual(note, { site: 'north', issue_id: 11, note_added: true, uploads: 3 });
+});
+
+test('issue creation assigns the current user of the selected site by default', async (t) => {
+  const calls = [];
+  const client = await connect(t, ['north', 'south'], (site, method, path, { body }) => {
+    assert.equal(site, 'south');
+    calls.push([method, path]);
+    if (method === 'GET') return ok({ user: { id: 27 } });
+    assert.equal(body.issue.assigned_to_id, 27);
+    return ok({ issue: { id: 11, assigned_to: { id: 27 } } });
+  });
+  const created = await call(client, 'create_issue', { ...baselineIssue, site: 'south' });
+  assert.ok(created.verified.applied.includes('assigned_to_id'));
+  assert.deepEqual(calls, [['GET', '/users/current.json'], ['POST', '/issues.json']]);
+});
+
+test('issue creation stops when the current account cannot be resolved', async (t) => {
+  const calls = [];
+  const client = await connect(t, ['north', 'south'], (site, method, path) => {
+    calls.push([site, method, path]);
+    if (site === 'north') return ok({ user: { id: 0 } });
+    throw new TransportError('auth', 'API key 無效或權限不足', 403);
+  });
+  await error(client, 'create_issue', { ...baselineIssue, site: 'north' }, /未回傳有效的當前帳號 ID/);
+  await error(client, 'create_issue', { ...baselineIssue, site: 'south' }, /API key 無效或權限不足/);
+  assert.deepEqual(calls, [
+    ['north', 'GET', '/users/current.json'], ['south', 'GET', '/users/current.json'],
+  ]);
 });
 
 test('metadata caches formatted successes by site, retries failures, and leaves changing lists uncached', async (t) => {
@@ -353,7 +382,7 @@ test('MCP preserves JSON-encoded composite arguments and safe Redmine error text
     site: 'null', limit: '15', custom_field_filters: '{"8":"1"}', subject_keyword: '"null"',
   }),
     { sites: { north: { issues: [], limit: 0, offset: 0, total_count: 0 } } });
-  await error(client, 'create_issue', { ...baselineIssue, custom_fields: '{"４２":"yes"}' },
+  await error(client, 'create_issue', { ...baselineIssue, assigned_to_id: 9, custom_fields: '{"４２":"yes"}' },
     /Error executing tool create_issue: Redmine 驗證失敗（HTTP 422）：&lt;wrong&gt; \[REDACTED\]/);
 });
 
