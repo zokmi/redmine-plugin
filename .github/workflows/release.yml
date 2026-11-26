@@ -52,6 +52,16 @@ jobs:
         run: npm test
       - name: Verify release change collectors
         run: node --test skills/release-change-items/tests/cli.test.mjs
+      - name: Prepare legacy interpreter for migration fixtures
+        id: legacy
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Read attachments created by the retired runtime
+        working-directory: redmine-mcp-node
+        env:
+          STORAGE_TEST_PYTHON: ${{ steps.legacy.outputs.python-path }}
+        run: node --test --test-name-pattern="legacy Python cache|Python and Node exchange" tests/posix-store.test.mjs tests/windows-store.test.mjs
 
   release:
     needs: runtime

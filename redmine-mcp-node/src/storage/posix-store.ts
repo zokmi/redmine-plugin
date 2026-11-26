@@ -4,7 +4,7 @@ import { readdir } from 'node:fs/promises';
 import path from 'node:path/posix';
 import { Writable } from 'node:stream';
 import { fingerprint, signature, verifyArchive, writeAll, writeArchive } from './posix-archive.js';
-import { mkdirAt, openAt, openDirectory, renameAt, renameNewAt, tryFlock, unlinkAt } from './posix-handles.js';
+import { assertPrivateAcl, mkdirAt, openAt, openDirectory, renameAt, renameNewAt, tryFlock, unlinkAt } from './posix-handles.js';
 import { parseItemRecord, type ItemRecord } from './record.js';
 import { siteStorageKey } from './site-key.js';
 import type { AttachmentStore, StagedDownload } from './store.js';
@@ -42,6 +42,7 @@ function checked(fd: number, directory: boolean, uploadSource = false): number {
   if (s.uid !== uid() || (s.mode & forbiddenMode) !== 0 || (directory ? !s.isDirectory() : !s.isFile() || s.nlink !== 1)) {
     throw new Error('Attachment storage requires private, user-owned directories and regular files');
   }
+  assertPrivateAcl(fd, uploadSource);
   return fd;
 }
 
@@ -199,6 +200,8 @@ async function sweepItem(site: number, records: number, locks: number, key: stri
       const zipStamp = await verifyArchive(zip, record);
       // Re-establish both durable publications when recovering from a previous failed barrier.
       fsyncSync(zip); fsyncSync(metadata); fsyncSync(archives); fsyncSync(records); fsyncSync(site);
+      assertNamed(archives, zipName, zip);
+      if (signature(zip) !== zipStamp) throw new Error('Archive changed');
       if (source !== undefined) {
         const sourceStamp = signature(source), actual = await fingerprint(source);
         if (actual.size !== record.size || actual.sha256 !== record.sha256 || signature(source) !== sourceStamp) {
@@ -274,6 +277,17 @@ AttachmentStore & { sweep(now?: Date, signal?: AbortSignal): Promise<void> } {
         writeRecord(s.records, record);
         s.published = path.join(rootPath, record.site_key, 'active', record.item_id, record.filename);
         return s.published;
+      } catch (error) {
+        // A directory flush can fail after the record was renamed. Only discard our
+        // own staged inode when we can confirm no record was actually published.
+        try {
+          if (optionalFile(s.handles, s.records, s.record.item_id + '.json') === undefined) {
+            for (const name of ['.download.part', s.record.filename]) {
+              try { removeOwned(s.item, name, s.fd); } catch { /* Missing or replaced. */ }
+            }
+          }
+        } catch { /* Uncertain record state: retain the payload. */ }
+        throw error;
       } finally { s.handles.close(); }
     },
     async discard(value) {

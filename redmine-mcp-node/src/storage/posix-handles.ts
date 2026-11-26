@@ -2,6 +2,27 @@ import { closeSync, constants, fsyncSync, openSync, readlinkSync } from 'node:fs
 import { posix } from 'node:path';
 import { getSystemErrorName } from 'node:util';
 import koffi from 'koffi';
+export { assertPrivateAcl } from './darwin-acl.js';
+
+type RenameNew = (fromDir: number, from: string, toDir: number, to: string) => number;
+
+function bindRenameNew(lib: ReturnType<typeof koffi.load>): RenameNew {
+  if (process.platform === 'darwin') {
+    const rename = lib.func('int renameatx_np(int, const char *, int, const char *, unsigned int)');
+    return (a, src, b, dest) => rename(a, src, b, dest, 4); // RENAME_EXCL
+  }
+  try {
+    const rename = lib.func('int renameat2(int, const char *, int, const char *, unsigned int)');
+    return (a, src, b, dest) => rename(a, src, b, dest, 1); // RENAME_NOREPLACE
+  } catch {
+    // musl installations without the glibc renameat2 wrapper expose the syscall directly.
+    const numbers: Record<string, number> = { x64: 316, ia32: 353, arm: 382, arm64: 276, riscv64: 276, loong64: 276, ppc64: 357, s390x: 347 };
+    const nr = numbers[process.arch];
+    if (nr === undefined) throw new Error('This Linux architecture requires libc renameat2');
+    const syscall = lib.func('long syscall(long, ...)');
+    return (a, src, b, dest) => syscall(nr, 'long', a, 'const char *', src, 'long', b, 'const char *', dest, 'long', 1);
+  }
+}
 
 function bindLibc() {
   if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('POSIX handles require Linux or macOS');
@@ -10,7 +31,7 @@ function bindLibc() {
     openAt: lib.func('int openat(int, const char *, int, ...)'),
     mkdirAt: lib.func(`int mkdirat(int, const char *, ${process.platform === 'darwin' ? 'uint16_t' : 'uint32_t'})`),
     renameAt: lib.func('int renameat(int, const char *, int, const char *)'),
-    linkAt: lib.func('int linkat(int, const char *, int, const char *, int)'),
+    renameNew: bindRenameNew(lib),
     unlinkAt: lib.func('int unlinkat(int, const char *, int)'),
     flock: lib.func('int flock(int, int)'),
   };
@@ -50,9 +71,9 @@ export function renameAt(fromDir: number, from: string, toDir: number, to: strin
   checked('renameat', () => libc().renameAt(fromDir, src, toDir, dest));
 }
 
-export function linkAt(fromDir: number, from: string, toDir: number, to: string): void {
+export function renameNewAt(fromDir: number, from: string, toDir: number, to: string): void {
   const src = component(from), dest = component(to);
-  checked('linkat', () => libc().linkAt(fromDir, src, toDir, dest, 0));
+  checked('exclusive rename', () => libc().renameNew(fromDir, src, toDir, dest));
 }
 
 export function unlinkAt(parent: number, name: string, directory = false): void {

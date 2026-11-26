@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { constants, chmodSync, closeSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureSnapshot, writePrivate } from '../dist/config-write.js';
-import { openAt, openDirectory, tryFlock } from '../dist/storage/posix-handles.js';
+import { openAt, openDirectory, renameNewAt, tryFlock } from '../dist/storage/posix-handles.js';
 
 const posix = { skip: process.platform === 'win32' };
 function fixture(t) {
@@ -15,6 +16,23 @@ function fixture(t) {
 }
 const mode = path => statSync(path).mode & 0o777;
 const lockName = '.redmine-config-' + createHash('sha256').update('config.toml').digest('hex') + '.lock';
+
+test('POSIX exclusive rename preserves an existing destination and publishes exactly one name', posix, t => {
+  const dir = fixture(t), src = join(dir, 'src'), dest = join(dir, 'dest');
+  writeFileSync(src, 'staged');
+  writeFileSync(dest, 'original');
+  const fd = openDirectory(dir);
+  try {
+    assert.throws(() => renameNewAt(fd, 'src', fd, 'dest'), { code: 'EEXIST' });
+    assert.equal(readFileSync(dest, 'utf8'), 'original');
+    assert.equal(readFileSync(src, 'utf8'), 'staged');
+    unlinkSync(dest);
+    renameNewAt(fd, 'src', fd, 'dest');
+    assert.deepEqual(readdirSync(dir), ['dest']);
+    assert.equal(statSync(dest).nlink, 1);
+    assert.equal(readFileSync(dest, 'utf8'), 'staged');
+  } finally { closeSync(fd); }
+});
 
 test('POSIX config creates missing private directories and publishes a complete private file', posix, t => {
   const dir = fixture(t);
@@ -59,6 +77,24 @@ test('POSIX config rejects symlinks, non-regular files and hard-linked targets',
   mkdirSync(file);
   assert.throws(() => captureSnapshot(file));
   assert.equal(readFileSync(outside, 'utf8'), 'original');
+});
+
+test('macOS refuses a private-mode config or cache carrying an inherited read grant', { skip: process.platform !== 'darwin' }, async t => {
+  const dir = fixture(t), file = join(dir, 'config.toml'), cache = join(dir, 'cache');
+  mkdirSync(cache, { mode: 0o700 });
+  // A file-inherit ACE leaves the 0600 POSIX mode intact but grants effective read access.
+  execFileSync('/bin/chmod', ['+a', 'everyone allow read,file_inherit,directory_inherit', dir]);
+  assert.throws(() => writePrivate(file, 'secret value', { exists: false }), /ACL/);
+  assert.throws(() => statSync(file), { code: 'ENOENT' });
+  writeFileSync(file, 'old value', { mode: 0o600 });
+  assert.equal(mode(file), 0o600);
+  assert.throws(() => captureSnapshot(file), /ACL/);
+  assert.equal(readFileSync(file, 'utf8'), 'old value');
+  execFileSync('/bin/chmod', ['+a', 'everyone allow list', cache]);
+  const { createPosixAttachmentStore } = await import('../dist/storage/posix-store.js');
+  const store = createPosixAttachmentStore({ root: cache });
+  await assert.rejects(store.stageDownload('https://example.test', 'a.txt'), /ACL/);
+  assert.deepEqual(readdirSync(cache), []);
 });
 
 test('POSIX config lock excludes writers, rejects unsafe aliases, and releases on close', posix, t => {

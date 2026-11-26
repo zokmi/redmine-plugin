@@ -142,6 +142,8 @@ Plugin 格式參考：[OpenAI plugin 文件](https://developers.openai.com/plugi
 | macOS | `~/Library/Application Support/redmine-mcp/attachments` |
 | Linux | `$XDG_DATA_HOME/redmine-mcp/attachments`；未設定或非絕對路徑時用 `~/.local/share/redmine-mcp/attachments` |
 
+macOS／Linux 請將設定檔與受管理附件放在支援檔案鎖、目錄同步與原子重新命名的本機檔案系統，例如 APFS 或 ext4。服務以這些操作保護同時寫入、升級及中斷後的資料。
+
 套件只以自身觀察到的最後使用時間判定閒置；直接在其他程式開啟檔案不會更新這個時間。套件建立的暫存閒置滿 7 天後壓成 ZIP，驗證完成才移除未壓縮的暫存；從壓縮完成起再保留 30 天，之後刪除 ZIP 與對應記錄。期限固定，沒有新增管理參數；`max_attachment_mb` 仍控制單一附件大小上限。
 
 清理在 server 啟動時觸發，附件操作也會觸發，但同一行程最多每小時掃描一次。沒有常駐行程或附件操作時不保證準點清理。需要舊暫存時，可在刪除前手動解開 ZIP，或從 Redmine 重新下載附件。

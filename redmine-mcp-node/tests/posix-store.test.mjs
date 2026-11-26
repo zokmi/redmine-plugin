@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { chmod, link, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { finished } from 'node:stream/promises';
+import { fileURLToPath } from 'node:url';
 import { createPosixAttachmentStore } from '../dist/storage/posix-store.js';
 import { fingerprint, verifyArchive, writeArchive } from '../dist/storage/posix-archive.js';
 
@@ -125,5 +127,36 @@ test('POSIX publisher rejects stage contents changed after receipt', posix, asyn
   const item = join(root, key, 'active', id);
   await writeFile(join(item, '.download.part'), 'other');
   await assert.rejects(store.publish(stage));
+  await assert.rejects(stat(join(item, '.download.part')), { code: 'ENOENT' });
   await assert.rejects(stat(join(root, key, 'records', id + '.json')), { code: 'ENOENT' });
+});
+
+test('an actual legacy Python cache under umask 022 can be borrowed and archived by Node', {
+  skip: posix.skip || !process.env.STORAGE_TEST_PYTHON,
+}, async (t) => {
+  const { root, store, start } = await fixture(t);
+  const python = (code, ...args) => execFileSync(process.env.STORAGE_TEST_PYTHON, ['-c', code, root, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, PYTHONPATH: fileURLToPath(new URL('../../redmine-mcp/src/', import.meta.url)), PYTHONUTF8: '1' },
+  }).trim();
+  const created = JSON.parse(python([
+    'import json, os, stat, sys',
+    'from datetime import datetime, timezone',
+    'from pathlib import Path',
+    'from redmine_mcp.attachment_storage.store import AttachmentStore',
+    'os.umask(0o022)',
+    'root = Path(sys.argv[1])',
+    's = AttachmentStore(root, clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc))',
+    'with s.begin_download("https://example.com", "python.txt") as p:',
+    '    with p.open_writer() as output: output.write(b"from python")',
+    '    result = p.publish()',
+    'print(json.dumps({"path": str(result), "files": sorted(set(stat.S_IMODE(p.stat().st_mode) for p in root.rglob("*") if p.is_file())), "dirs": sorted(set(stat.S_IMODE(p.stat().st_mode) for p in [root, *root.rglob("*")] if p.is_dir()))}))',
+  ].join('\n')));
+  assert.deepEqual(created.files, [0o600]);
+  assert.deepEqual(created.dirs, [0o700]);
+  assert.equal((await store.borrowSource(created.path, 100, null)).toString(), 'from python');
+  await store.sweep(new Date(+start + 7 * day));
+  const { archive, record } = locations(created.path);
+  assert.equal(JSON.parse(await readFile(record)).state, 'archived');
+  assert.equal(python('from zipfile import ZipFile\nimport sys\nwith ZipFile(sys.argv[2]) as z: print(z.read("python.txt").decode())', archive), 'from python');
 });
