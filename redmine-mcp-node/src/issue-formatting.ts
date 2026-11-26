@@ -21,9 +21,14 @@ function wrapFieldValue(value: unknown): unknown {
 
 function preview(value: string, limit: number, prefix: number) {
   // Count and slice Unicode code points, like Python's str.
-  const chars = Array.from(value);
-  if (chars.length <= limit) return wrapUntrusted(value);
-  return { length: chars.length, preview: wrapUntrusted(chars.slice(0, prefix).join('')), truncated: true };
+  if (value.length <= limit) return wrapUntrusted(value);
+  let length = 0, prefixEnd = 0;
+  for (let i = 0; i < value.length;) {
+    i += value.codePointAt(i)! > 0xffff ? 2 : 1;
+    if (++length === prefix) prefixEnd = i;
+  }
+  if (length <= limit) return wrapUntrusted(value);
+  return { length, preview: wrapUntrusted(value.slice(0, prefixEnd)), truncated: true };
 }
 
 function formatJournalValue(value: unknown): unknown {

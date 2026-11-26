@@ -41,7 +41,7 @@ description: 當使用者要查核、稽核或驗收 Redmine 單號是否由程�
 - `UNAVAILABLE`：沒有適用的審核 skill 或無法啟動唯讀子代理。
 
 只有 `PASS` 可以進入 Redmine 更新；其他結果都要保留 BDD 輸出並回報阻擋原因。
-若流程可執行本 plugin 的腳本，使用 `scripts/consistency_gate.py` 的 `select_skill(context)` 選擇器與 `can_update_redmine(evidence)` 閘門；兩者都是純函式，不會自行修改檔案或呼叫 Redmine。
+若流程可執行本 plugin 的腳本，以 Node.js 匯入 `scripts/consistency_gate.mjs` 的 `select_skill(context)` 與 `can_update_redmine(evidence)`。前者選擇審核 skill，後者依證據判定是否可回寫。
 
 ## 步驟 1：確認查核範圍
 
@@ -67,12 +67,12 @@ commit」，其餘單號會另外列出來，供反向查核使用。
 ## 步驟 2：取得 git 事實
 
 ```bash
-py <skill>/scripts/collect_issue_changes.py --repo <repo路徑> --range master..HEAD
-py <skill>/scripts/collect_issue_changes.py --repo <repo路徑> --issues 94206
-py <skill>/scripts/collect_issue_changes.py --repo <repo路徑> --commits d1998e89 --with-diff
+node <skill>/scripts/collect_issue_changes.mjs --repo <repo路徑> --range master..HEAD
+node <skill>/scripts/collect_issue_changes.mjs --repo <repo路徑> --issues 94206
+node <skill>/scripts/collect_issue_changes.mjs --repo <repo路徑> --commits d1998e89 --with-diff
 ```
 
-Windows 用 `py`，其他環境用 `python3`。輸出 JSON，依單號分組。範圍很大時先加
+輸出 JSON，依單號分組。範圍很大時先加
 `--max-commits 50` 探勘，確認範圍對了再跑完整的。
 
 輸出裡有三個欄位是**反向查核的主要線索**，不要跳過：
@@ -97,7 +97,7 @@ Windows 用 `py`，其他環境用 `python3`。輸出 JSON，依單號分組。�
 ## 步驟 3：讀 Redmine 單
 
 已知站台時明寫 `site`，避免查遍所有站台。對每個單號呼叫 `get_issue`，帶 `include: ["journals"]`。
-先讀目前概述與最近紀錄；若有 `journals_next_offset`，以它作為 `journals_offset` 分批補讀需求來源。
+先讀目前概述與最近紀錄。若有 `journals_next_offset`，以它作為 `journals_offset`，指定原站與相同 `include`，並帶回該站的 `journals_snapshot`（若有），分批補讀需求來源。
 摘要或截斷內容不足以判定；相關原文讀完前標「待確認」，不可宣稱完整查核。
 
 - **註解不是附屬品，常常是唯一的需求來源。** 這個專案的單子描述欄經常是空的，

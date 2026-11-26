@@ -93,6 +93,8 @@ export const contracts = {
         '回應出現 journals_truncated 時代表還有更早的紀錄，確有需要再調高，數值過大會佔用大量對話空間。', { maximum: 200, minimum: 1 }), 20),
       summary: defaulted(boolean('摘要模式：省略次要欄位，內文與留言各最多 600 字；編輯或判定前用 false 讀全文。'), false),
       journals_offset: defaulted(integer('從最新紀錄跳過幾筆；以 journals_next_offset 讀較早一批。', { minimum: 0 }), 0),
+      journals_snapshot: nullable(string('續讀時帶入該站的快照，把 journals_next_offset 填入 journals_offset，' +
+        '並沿用該站的 site、issue_id 與 include。失效時從首頁重查；省略快照即時查詢。')),
     },
   },
   create_issue: {

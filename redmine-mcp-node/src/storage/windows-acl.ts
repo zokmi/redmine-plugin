@@ -1,6 +1,7 @@
 import koffi from 'koffi';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { AdministratorsOwnedItemError } from './store.js';
 const a = process.platform === 'win32' ? koffi.load('advapi32.dll') : null;
 const k = process.platform === 'win32' ? koffi.load('kernel32.dll') : null;
 const free = k?.func('void * __stdcall LocalFree(void *)');
@@ -51,6 +52,9 @@ export function verifyPrivateHandle(handle: unknown, requireProtected = false): 
         if (!stringifySid?.(owner[0], numericOwner) || !numericOwner[0]) throw new Error('Cannot inspect owner SID');
         ownerSid = koffi.decode.string16(numericOwner[0]);
       } finally { if (numericOwner[0]) free?.(numericOwner[0]); }
+      if (ownerSid !== sid && ownerSid === 'S-1-5-32-544') {
+        throw new AdministratorsOwnedItemError();
+      }
       if (!match || ownerSid !== sid || !match[3] || (requireProtected && !match[2].includes('P'))) throw new Error('Unsafe owner or DACL');
       const aces = match[3].match(/\([^()]*\)/g) ?? [];
       if (!aces.length || aces.join('') !== match[3]) throw new Error('Unsafe DACL');

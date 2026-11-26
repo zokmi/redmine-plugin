@@ -1,11 +1,12 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, resolve } from 'node:path';
 import { lstatSync } from 'node:fs';
+import { capturePosixSnapshot, writePosixPrivate } from './config-write-posix.js';
 import { closeHandle, openDirectory, openGuardedFile, snapshotHandle, tryLock, createPrivateDirectory, createPrivateFile, writeHandle, flushHandle, renameHandle, deleteHandle } from './storage/windows-handles.js';
 
 export type ConfigSnapshot = {exists: false} | {exists: true, identity: string, bytes: Buffer};
 export function captureSnapshot(path: string): ConfigSnapshot {
-  if (process.platform !== 'win32') throw new Error('非 Windows 請使用既有 Python 設定命令');
+  if (process.platform !== 'win32') return capturePosixSnapshot(path);
   try { lstatSync(path); } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {exists:false};
     throw error;
@@ -17,7 +18,7 @@ export function captureSnapshot(path: string): ConfigSnapshot {
   } finally { closeHandle(parent); }
 }
 export function writePrivate(path: string, text: string, snapshot: ConfigSnapshot): void {
-  if (process.platform !== 'win32') throw new Error('非 Windows 請使用既有 Python 設定命令');
+  if (process.platform !== 'win32') return writePosixPrivate(path, text, snapshot);
   const missing: string[] = [];
   let directory = dirname(resolve(path));
   while (true) {

@@ -27,8 +27,17 @@ function customFields(raw: JsonObject): JsonObject {
   };
 }
 
+type MetadataRead = {
+  value: Promise<JsonObject>;
+  controller: AbortController;
+  readers: number;
+  ready: boolean;
+};
+
+// The worker shares Site instances across MCP sessions. Their identity also isolates credentials.
+const caches = new WeakMap<Site, Map<string, MetadataRead>>();
+
 export function registerMetadata(tools: ToolRegistry, sites: SiteRegistry, timeoutMs?: number): void {
-  const caches = new Map<Site, Map<string, JsonObject>>();
   async function cached(
     site: Site, path: string, signal: AbortSignal, format: (raw: JsonObject) => JsonObject,
   ): Promise<JsonObject> {
@@ -37,12 +46,39 @@ export function registerMetadata(tools: ToolRegistry, sites: SiteRegistry, timeo
       cache = new Map();
       caches.set(site, cache);
     }
-    const hit = cache.get(path);
-    if (hit) return hit;
-    const value = format(await requestObject(site, 'GET', path, { signal }));
     signal.throwIfAborted();
-    cache.set(path, value);
-    return value;
+    let entry = cache.get(path);
+    if (!entry) {
+      const controller = new AbortController();
+      const read: MetadataRead = {
+        controller, readers: 0, ready: false,
+        value: requestObject(site, 'GET', path, { signal: controller.signal }).then((raw) => {
+          controller.signal.throwIfAborted();
+          const result = format(raw);
+          read.ready = true;
+          return result;
+        }),
+      };
+      cache.set(path, read);
+      entry = read;
+    }
+    if (entry.ready) return entry.value;
+
+    const read = entry;
+    read.readers++;
+    const leave = () => {
+      if (--read.readers === 0 && !read.ready && cache.get(path) === read) {
+        cache.delete(path);
+        read.controller.abort();
+      }
+    };
+    signal.addEventListener('abort', leave, { once: true });
+    try {
+      return await read.value;
+    } finally {
+      signal.removeEventListener('abort', leave);
+      if (!signal.aborted) leave();
+    }
   }
   async function across(
     name: string | null, signal: AbortSignal, fetch: (site: Site, signal: AbortSignal) => Promise<JsonObject>,

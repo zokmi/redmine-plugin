@@ -5,6 +5,7 @@ import { createTransport, TransportError, type JsonOptions, type JsonResponse, t
 
 const MAX_CONCURRENT_SITES = 8;
 const PER_SITE_TIMEOUT_MS = 20_000;
+const BATCH_TIMEOUT_MS = 25_000;
 
 export type TransportFactory = (site: SiteSettings) => RedmineTransport;
 
@@ -113,14 +114,21 @@ export async function fanOut<T>(
 ): Promise<{ payload: Record<string, T | { error: string } | null>; foundIn: string[] }> {
   const entries = [...sites];
   const timeoutMs = options.timeoutMs ?? PER_SITE_TIMEOUT_MS;
+  const batch = new AbortController();
+  const deadlineAt = performance.now() + BATCH_TIMEOUT_MS;
+  const batchTimer = setTimeout(() => batch.abort(), BATCH_TIMEOUT_MS);
   const results: SiteResult<T>[] = [];
   let next = 0;
   async function worker() {
-    while (next < entries.length && !options.signal.aborted) {
+    while (next < entries.length && !options.signal.aborted && !batch.signal.aborted) {
+      if (performance.now() >= deadlineAt) {
+        batch.abort();
+        break;
+      }
       const index = next++;
       const [, site] = entries[index];
       const controller = new AbortController();
-      const signal = AbortSignal.any([options.signal, controller.signal]);
+      const signal = AbortSignal.any([options.signal, batch.signal, controller.signal]);
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       let abort: () => void;
       try {
@@ -134,7 +142,9 @@ export async function fanOut<T>(
         });
         results[index] = { value: await Promise.race([request, deadline]) };
       } catch (error) {
-        if (controller.signal.aborted) {
+        if (batch.signal.aborted) {
+          results[index] = { error: '整批查詢逾時（25 秒），此站已開始，尚未完成' };
+        } else if (controller.signal.aborted) {
           results[index] = { error: `此站台於 ${(timeoutMs / 1000).toFixed(0)} 秒內未回應（查詢逾時）` };
         } else if (error instanceof TransportError) {
           results[index] = options.noneOnNotFound && error.code === 'not_found'
@@ -149,11 +159,15 @@ export async function fanOut<T>(
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(entries.length, MAX_CONCURRENT_SITES) }, worker));
+  try {
+    await Promise.all(Array.from({ length: Math.min(entries.length, MAX_CONCURRENT_SITES) }, worker));
+  } finally {
+    clearTimeout(batchTimer);
+  }
   options.signal.throwIfAborted();
   const foundIn: string[] = [];
   const payload = Object.fromEntries(entries.map(([name], index) => {
-    const result = results[index];
+    const result = results[index] ?? { error: '整批查詢逾時（25 秒），此站仍在排隊，尚未開始' };
     if ('error' in result) return [name, result];
     if (result.value !== null) foundIn.push(name);
     return [name, result.value];

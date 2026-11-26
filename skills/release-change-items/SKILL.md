@@ -47,11 +47,11 @@ SQL 或設定值。填錯會讓人漏執行、漏檢核，比留白危險得多�
 ### 2. 蒐集 git 異動
 
 ```bash
-py <skill>/scripts/collect_changes.py --repo <repo路徑> --range main..HEAD
-py <skill>/scripts/collect_changes.py --repo <repo路徑> --issues 4590,4432
+node <skill>/scripts/collect_changes.mjs --repo <repo路徑> --range main..HEAD
+node <skill>/scripts/collect_changes.mjs --repo <repo路徑> --issues 4590,4432
 ```
 
-Windows 用 `py`，其他環境用 `python3`。腳本輸出 JSON，把 commit 依單號分組，
+這兩個工具使用 Node.js 22 以上，蒐集異動時需可執行 Git。腳本輸出 JSON，把 commit 依單號分組，
 並把檔案分成 `sql` / `config` / `code` / `doc` / `build` 五桶。
 
 注意輸出裡的 `未標號` 群組：那是 commit 標題沒帶單號（或只寫 `#0000`）的異動。
@@ -62,7 +62,7 @@ Windows 用 `py`，其他環境用 `python3`。腳本輸出 JSON，把 commit �
 
 已知站台時明寫 `site`。對每個單號呼叫 `get_issue`（帶 `include: ["journals"]`，註解裡常有真正的規格討論）。
 
-若有 `journals_next_offset`，以它作為 `journals_offset` 分批讀較早需求討論；未讀完的範圍須標待確認。
+若有 `journals_next_offset`，以它作為 `journals_offset`，指定原站與相同 `include`，並帶回該站的 `journals_snapshot`（若有），分批讀較早需求討論。未讀完的範圍須標待確認。
 
 站台處理：省略 `site` 會同時查所有站台。若某站回 403 之類的授權錯誤，
 那是該站 API key 沒權限，忽略它、用有查到的站台結果即可，不要因此中斷。
@@ -86,8 +86,8 @@ Windows 用 `py`，其他環境用 `python3`。腳本輸出 JSON，把 commit �
 **再把異動對應到功能頁：**
 
 ```bash
-py <skill>/scripts/collect_changes.py --repo <repo> --range <範圍> > changes.json
-py <skill>/scripts/map_features.py --repo <repo> --files-from changes.json
+node <skill>/scripts/collect_changes.mjs --repo <repo> --range <範圍> > changes.json
+node <skill>/scripts/map_features.mjs --repo <repo> --files-from changes.json
 ```
 
 輸出的 `routes` 是異動檔案對應到的前台路由（例如 `/report/report9`、`/login`），

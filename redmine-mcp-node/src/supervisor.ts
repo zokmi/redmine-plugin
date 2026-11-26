@@ -7,11 +7,10 @@ import { fileURLToPath } from 'node:url';
 
 const host = '127.0.0.1';
 const portArgument = process.argv[4] ?? '18765';
-const python = process.execPath;
 const port = Number(portArgument);
 const localToken = process.env.REDMINE_MCP_LOCAL_TOKEN ?? '';
-if (!python || !Number.isInteger(port) || port < 1 || port > 65535) {
-  throw new Error('Usage: node local-service.mjs <python executable> [port]');
+if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  throw new Error('Usage: redmine-mcp serve [--port PORT]');
 }
 if (!/^[A-Za-z0-9_-]{32,}$/.test(localToken)) {
   throw new Error('REDMINE_MCP_LOCAL_TOKEN must contain at least 32 URL-safe characters.');
@@ -106,9 +105,9 @@ process.on('SIGINT', () => stop());
 process.on('SIGTERM', () => stop());
 server.on('error', error => stop(`無法監聽 ${host}:${port} (${error.code})`));
 function startWorker() {
-  const env = { ...process.env, PYTHONUTF8: '1', REDMINE_MCP_WORKER_TOKEN: workerToken };
+  const env = { ...process.env, REDMINE_MCP_WORKER_TOKEN: workerToken };
   delete env.REDMINE_MCP_LOCAL_TOKEN;
-  worker = spawn(python, [fileURLToPath(new URL('./worker.js', import.meta.url))], {
+  worker = spawn(process.execPath, [fileURLToPath(new URL('./worker.js', import.meta.url))], {
     env, windowsHide: true, stdio: ['pipe', 'pipe', 'inherit'],
   });
   worker.on('error', error => console.error(`Redmine worker 錯誤 (${error.code})`));

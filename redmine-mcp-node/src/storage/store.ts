@@ -1,5 +1,10 @@
 import type { Writable } from 'node:stream';
 
+export class AdministratorsOwnedItemError extends Error {
+  static readonly diagnostic = 'Unsafe owner or DACL: this item is owned by the Windows Administrators group. The attachment store requires the current user as owner.';
+  constructor() { super(AdministratorsOwnedItemError.diagnostic); }
+}
+
 /** Implementations must pin directory handles and enforce the configured source boundary. */
 export interface StagedDownload { readonly writer: Writable }
 export interface AttachmentStore {

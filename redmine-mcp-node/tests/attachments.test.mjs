@@ -4,6 +4,35 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../dist/server.js';
 
+test('tools/call reports the known Windows cache owner issue and hides other storage errors', async (t) => {
+  const { AdministratorsOwnedItemError } = await import('../dist/storage/store.js');
+  const settings = { sites: new Map([['one', { name: 'one', url: 'https://one.invalid',
+    apiKey: 'fixture-key', maxAttachmentBytes: 100, allowInsecureHttp: false, attachmentUploadRoot: null }]]) };
+  const store = {
+    async stageDownload() { throw new AdministratorsOwnedItemError(); },
+    async borrowSource(path) {
+      if (path === 'legacy') throw new AdministratorsOwnedItemError();
+      throw new Error('private path and internal failure');
+    },
+  };
+  const server = createServer(settings, { attachmentStore: store, transportFactory: () => ({
+    close() {}, async json() { return { status: 200, data: { attachment: { filename: 'file', content_url: 'https://one.invalid/file' } } }; },
+  }) });
+  const client = new Client({ name: 'owner-test', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  t.after(async () => { await client.close(); await server.close(); });
+  await server.connect(b); await client.connect(a);
+  for (const [name, args] of [['upload_attachment', { file_path: 'legacy' }], ['download_attachment', { attachment_id: 1 }]]) {
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /owned by the Windows Administrators group/);
+  }
+  const unknown = await client.callTool({ name: 'upload_attachment', arguments: { file_path: 'unknown' } });
+  assert.equal(unknown.isError, true);
+  assert.match(unknown.content[0].text, /非預期錯誤/);
+  assert.doesNotMatch(unknown.content[0].text, /private path/);
+});
+
 test('download publishes actual HTTP bytes through the Windows store', { skip: process.platform !== 'win32', timeout: 10000 }, async (t) => {
   const { createServer: httpServer } = await import('node:http');
   const { once } = await import('node:events');
@@ -127,6 +156,48 @@ test('base64 accepts Python whitespace and data URI', async () => {
   const handlers = await directHandlers({ upload: async () => ({ data: { upload: { token: 't' } } }) });
   const result = await handlers.get('upload_attachment')({ file_path: null, content_base64: '\u0085data:image/png;base64, iVBO\u001cRw0K Ggo=\n', site: null, filename: 'x' }, new AbortController().signal);
   assert.equal(result.filename, 'x.png'); assert.equal(result.bytes, 8);
+});
+
+test('large image decoding lets a queued attachment query finish before transport upload', async () => {
+  const raw = Buffer.alloc(2 * 1024 * 1024);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(raw);
+  const encoded = raw.toString('base64');
+  const calls = [];
+  const handlers = await directHandlers({
+    max: raw.length,
+    json: async () => ({ data: { issue: { attachments: [] } } }),
+    upload: async (_name, bytes) => {
+      calls.push('upload');
+      assert.deepEqual(bytes, raw);
+      return { data: { upload: { token: 'ok' } } };
+    },
+  });
+  const signal = new AbortController().signal;
+  const query = new Promise((resolve, reject) => setImmediate(() => {
+    handlers.get('list_attachments')({ issue_id: 1, site: 'one' }, signal)
+      .then(() => { calls.push('query'); resolve(); }, reject);
+  }));
+  const wrapped = 'data:image/png;base64,' + encoded.match(/.{1,77}/g).join('\u0085');
+  await Promise.all([handlers.get('upload_attachment')({ content_base64: wrapped }, signal), query]);
+  assert.deepEqual(calls, ['query', 'upload']);
+});
+
+test('large upload cancellation and malformed padding never reach the transport', async () => {
+  const raw = Buffer.alloc(1024 * 1024, 0);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(raw);
+  const encoded = raw.toString('base64');
+  let uploads = 0;
+  const handlers = await directHandlers({ max: raw.length, upload: async () => {
+    uploads++; return { data: { upload: { token: 'unexpected' } } };
+  } });
+  const upload = handlers.get('upload_attachment');
+  const controller = new AbortController();
+  setImmediate(() => controller.abort());
+  await assert.rejects(upload({ content_base64: encoded }, controller.signal), { name: 'AbortError' });
+  for (const invalid of [encoded + 'A', encoded.slice(0, 65535) + '=' + encoded.slice(65536), encoded + '\uFEFF']) {
+    await assert.rejects(upload({ content_base64: invalid }, new AbortController().signal), /base64/);
+  }
+  assert.equal(uploads, 0);
 });
 
 test('cancel during staging skips transport and discards', async () => {

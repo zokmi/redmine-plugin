@@ -66,20 +66,43 @@ test('failed publish removes the unrecorded file', { skip: process.platform !== 
 });
 
 test('Python and Node exchange on-disk cache entries', { skip: process.platform !== 'win32' || !process.env.STORAGE_TEST_PYTHON }, async () => {
-  const { spawnSync } = await import('node:child_process');
+  const { execFileSync } = await import('node:child_process');
   const { resolve } = await import('node:path');
   const { createWindowsAttachmentStore } = await import('../dist/storage/windows-store.js');
   const base = await mkdtemp(join(tmpdir(), 'rm-python-store-'));
   const parent = openDirectory(base); const root = createPrivateDirectory(parent, 'cache'); closeHandle(root); closeHandle(parent);
   const cache = join(base, 'cache');
-  const run = (code, ...args) => { const p = spawnSync(process.env.STORAGE_TEST_PYTHON, ['-c', code, cache, ...args], {encoding:'utf8', env:{...process.env, PYTHONPATH:resolve('../redmine-mcp/src')}}); assert.equal(p.status, 0, p.stderr); return p.stdout.trim(); };
   try {
     const store = createWindowsAttachmentStore({root:cache});
     const stage = await store.stageDownload('https://example.com', 'node.txt'); stage.writer.end('from node'); await once(stage.writer, 'finish');
     const nodePath = await store.publish(stage);
-    assert.equal(run('import sys; from pathlib import Path; from redmine_mcp.attachment_storage.store import AttachmentStore; s=AttachmentStore(Path(sys.argv[1]));\nwith s.borrow_source(Path(sys.argv[2]),100) as data: print(data.decode())', nodePath), 'from node');
-    const pyPath = run('import sys; from pathlib import Path; from redmine_mcp.attachment_storage.store import AttachmentStore; s=AttachmentStore(Path(sys.argv[1]));\nwith s.begin_download("https://example.com", "python.txt") as p:\n with p.open_writer() as f: f.write(b"from python")\n print(p.publish())');
-    assert.equal(Buffer.from(await store.borrowSource(pyPath,100,null)).toString(), 'from python');
+    const fixture = JSON.parse(execFileSync(process.env.STORAGE_TEST_PYTHON,
+      ['-B', 'test-support/legacy-windows-storage.py', cache, nodePath], {
+        encoding: 'utf8', env: { ...process.env, PYTHONPATH: resolve('../redmine-mcp/src') },
+      }));
+    assert.equal(fixture.borrowed, 'from node');
+    assert.equal((await store.borrowSource(fixture.ordinary, 100, null)).toString(), 'from python');
+
+    const item = dirname(fixture.native), site = dirname(dirname(item));
+    const lockPath = join(site, 'locks', basename(item) + '.lock');
+    const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const identity = JSON.parse(execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', [
+      '$ErrorActionPreference = "Stop"',
+      '$sidType = [System.Security.Principal.SecurityIdentifier]',
+      '$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()',
+      '$acl = [System.IO.File]::GetAccessControl($env:LEGACY_FIXTURE_LOCK, [System.Security.AccessControl.AccessControlSections]::Owner)',
+      '$lockOwner = $acl.GetOwner($sidType).Value',
+      '@{user=$identity.User.Value; defaultOwner=$identity.Owner.Value; lockOwner=$lockOwner} | ConvertTo-Json -Compress',
+    ].join('\n')], { encoding: 'utf8', env: { ...process.env, LEGACY_FIXTURE_LOCK: lockPath } }));
+    assert.equal(identity.lockOwner, identity.defaultOwner);
+    if (identity.lockOwner === identity.user) {
+      assert.equal((await store.borrowSource(fixture.native, 100, null)).toString(), 'from python');
+    } else {
+      const error = identity.lockOwner === 'S-1-5-32-544'
+        ? /owned by the Windows Administrators group/ : /Unsafe owner or DACL/;
+      await assert.rejects(store.borrowSource(fixture.native, 100, null), error);
+      assert.equal(await readFile(fixture.native, 'utf8'), 'from python');
+    }
   } finally { await rm(base, {recursive:true, force:true}); }
 });
 
