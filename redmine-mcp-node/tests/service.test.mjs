@@ -11,6 +11,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { fileURLToPath } from 'node:url';
 import { mkdir, mkdtemp, readFile, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { basename, dirname, join } from 'node:path';
 let sandbox, env;
 function serviceEnvironment(home) {
@@ -49,6 +50,75 @@ test('serve authenticates and accepts concurrent SDK sessions', {timeout: 30000}
   const clients = [client(),client()]; t.after(() => Promise.all(clients.map(c => c.close())));
   await Promise.all(clients.map(c => c.connect(new StreamableHTTPClientTransport(url, {requestInit:{headers:{Authorization:`Bearer ${token}`}}}))));
   for (const c of clients) assert.ok((await c.listTools()).tools.some(x => x.name === 'list_sites'));
+});
+
+test('Windows cold start serves authenticated MCP while scanning 220 attachment records', {
+  skip: process.platform !== 'win32', timeout: 180_000,
+}, async t => {
+  const native = await import('../dist/storage/windows-handles.js');
+  const home = await mkdtemp(join(sandbox, 'cold-start-'));
+  const root = join(home, 'cache');
+  const siteKey = createHash('sha256').update('https://example.invalid').digest('hex');
+  const bytes = Buffer.from('cold startup fixture');
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  const fresh = new Date().toISOString().replace('Z', '+00:00');
+  const old = new Date(Date.now() - 8 * 86400000).toISOString().replace('Z', '+00:00');
+  const recordCount = 220;
+  const idOf = index => index.toString(16).padStart(32, '0');
+  function writeNative(parent, name, data) {
+    const file = native.openFile(parent, name, 'create');
+    try { native.writeHandle(file, data); } finally { native.closeHandle(file); }
+  }
+  const handles = [];
+  function keep(handle) { handles.push(handle); return handle; }
+  try {
+    const parent = keep(native.openDirectory(home));
+    const cache = keep(native.createPrivateDirectory(parent, 'cache'));
+    const site = keep(native.createDirectory(cache, siteKey));
+    const active = keep(native.createDirectory(site, 'active'));
+    const records = keep(native.createDirectory(site, 'records'));
+    keep(native.createDirectory(site, 'locks'));
+    for (let index = 1; index <= recordCount; index++) {
+      const id = idOf(index), timestamp = index === recordCount ? old : fresh;
+      const item = native.createDirectory(active, id);
+      try { writeNative(item, 'sample.txt', bytes); } finally { native.closeHandle(item); }
+      const record = { site_key: siteKey, item_id: id, filename: 'sample.txt', created_at: timestamp,
+        last_used_at: timestamp, state: 'active', size: bytes.length, sha256: hash, archived_at: null, schema_version: 1 };
+      writeNative(records, id + '.json', Buffer.from(JSON.stringify(record)));
+    }
+  } finally { for (const handle of handles.reverse()) native.closeHandle(handle); }
+
+  const port = await freePort();
+  const proc = spawn(process.execPath, [cli, 'serve', '--port', String(port)], {
+    env: { ...serviceEnvironment(home), REDMINE_MCP_STORAGE_ROOT: root, REDMINE_MCP_LOCAL_TOKEN: token },
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  });
+  const c = client();
+  t.after(async () => {
+    try { await c.close(); } finally {
+      if (proc.exitCode === null && proc.signalCode === null) {
+        const exited = once(proc, 'exit'); proc.kill(); await exited;
+      }
+    }
+  });
+  await ready(proc);
+  const started = performance.now();
+  const url = new URL(`http://127.0.0.1:${port}/mcp`);
+  await c.connect(new StreamableHTTPClientTransport(url, {requestInit: {headers: {Authorization: `Bearer ${token}`}}}));
+  const elapsed = Math.round(performance.now() - started);
+  t.diagnostic(`Authenticated cold initialization: ${elapsed} ms for ${recordCount} records`);
+  assert.ok(elapsed < 5000, `Cold initialization exceeded the 5 s health probe: ${elapsed} ms`);
+  assert.ok((await c.listTools()).tools.some(tool => tool.name === 'get_issue'));
+
+  const sitePath = join(root, siteKey);
+  const dueRecord = join(sitePath, 'records', idOf(recordCount) + '.json');
+  const deadline = performance.now() + 60_000;
+  while (JSON.parse(await readFile(dueRecord, 'utf8')).state !== 'archived') {
+    assert.ok(performance.now() < deadline, 'Startup sweep did not archive the due record');
+    await delay(100);
+  }
+  assert.deepEqual(await readFile(join(sitePath, 'active', idOf(1), 'sample.txt')), bytes);
+  assert.ok((await readFile(join(sitePath, 'archives', idOf(recordCount) + '.zip'))).length > 0);
 });
 
 test('stdio and HTTP download into the existing attachment root and reuse each other’s saved bytes', {timeout: 60_000}, async t => {

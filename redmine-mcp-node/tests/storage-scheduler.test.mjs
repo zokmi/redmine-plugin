@@ -12,3 +12,28 @@ test('storage sweep starts once, throttles triggers and aborts on close', async 
   scheduler.close(); assert.equal(signal.aborted, true);
   now += 3600001; await scheduler.store.borrowSource(); assert.equal(calls, 2);
 });
+
+test('a long background sweep never overlaps and a failed sweep remains retryable', async t => {
+  let now = 0, calls = 0, rejectPending;
+  const diagnostic = t.mock.method(console, 'error', () => {});
+  const source = {
+    sweep() {
+      calls++;
+      if (calls === 1) return new Promise((_resolve, reject) => { rejectPending = reject; });
+      return Promise.resolve();
+    },
+    async borrowSource() {},
+  };
+  const scheduler = scheduleStorage(source, () => now);
+  t.after(() => scheduler.close());
+  await new Promise(resolve => setImmediate(resolve));
+  now = 3600001;
+  await scheduler.store.borrowSource();
+  assert.equal(calls, 1);
+  rejectPending(new Error('worker exited'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(diagnostic.mock.callCount(), 1);
+  await scheduler.store.borrowSource();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2);
+});

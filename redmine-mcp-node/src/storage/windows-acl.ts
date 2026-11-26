@@ -1,24 +1,37 @@
 import koffi from 'koffi';
-import { execFileSync } from 'node:child_process';
-import path from 'node:path';
 import { AdministratorsOwnedItemError } from './store.js';
 const a = process.platform === 'win32' ? koffi.load('advapi32.dll') : null;
 const k = process.platform === 'win32' ? koffi.load('kernel32.dll') : null;
 const free = k?.func('void * __stdcall LocalFree(void *)');
-const systemDirectory = k?.func('uint32 __stdcall GetSystemDirectoryW(_Out_ void *, uint32)');
+const tokenInformation = a?.func('int __stdcall GetTokenInformation(intptr_t, int, void *, uint32, _Out_ uint32 *)');
 const descriptor = a?.func('int __stdcall ConvertStringSecurityDescriptorToSecurityDescriptorW(const char16_t *, uint32, _Out_ void **, void *)');
 const stringifySid = a?.func('int __stdcall ConvertSidToStringSidW(void *, _Out_ void **)');
 const stringify = a?.func('int __stdcall ConvertSecurityDescriptorToStringSecurityDescriptorW(void *, uint32, uint32, _Out_ void **, void *)');
 const securityInfo = a?.func('uint32 __stdcall GetSecurityInfo(void *, int, uint32, _Out_ void **, void *, _Out_ void **, void *, _Out_ void **)');
 const volumeInfo = k?.func('int __stdcall GetVolumeInformationByHandleW(void *, void *, uint32, void *, void *, _Out_ uint32 *, void *, uint32)');
+function sidString(value: unknown, subject: 'process' | 'owner'): string {
+  const out: unknown[] = [null];
+  try {
+    if (!value || !stringifySid?.(value, out) || !out[0]) throw new Error(`Cannot inspect ${subject} SID`);
+    return koffi.decode.string16(out[0]);
+  } finally { if (out[0]) free?.(out[0]); }
+}
+
+let processUserSid: string | undefined;
 function currentSid(): string {
-  const buffer = Buffer.alloc(32768 * 2);
-  const length = systemDirectory?.(buffer, 32768) ?? 0;
-  if (!length || length >= 32768) throw new Error('Cannot locate Windows system directory');
-  const result = execFileSync(path.win32.join(buffer.subarray(0, length * 2).toString('utf16le'), 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {encoding:'utf8', windowsHide:true});
-  const match = /,"(S-1-(?:[0-9]+-)*[0-9]+)"\s*$/i.exec(result.trim());
-  if (!match) throw new Error('Cannot inspect process SID');
-  return match[1];
+  if (processUserSid !== undefined) return processUserSid;
+  // GetCurrentProcessToken() is a non-owning pseudo-handle defined by the Windows SDK.
+  const processToken = -4, tokenUser = 1, size = [0];
+  tokenInformation?.(processToken, tokenUser, null, 0, size);
+  if (!size[0]) throw new Error('Cannot inspect process SID');
+  // TOKEN_USER starts with a pointer into its own buffer. Keep the allocation
+  // stable across both native calls and cache only the copied string in this isolate.
+  const user = koffi.alloc('uint8_t', size[0]);
+  try {
+    if (!tokenInformation?.(processToken, tokenUser, user, size[0], size)) throw new Error('Cannot inspect process SID');
+    processUserSid = sidString(koffi.decode(user, 'void *'), 'process');
+    return processUserSid;
+  } finally { koffi.free(user); }
 }
 function securityDescriptor(sddl: string): {descriptor: unknown, release: () => void} {
   const out: unknown[] = [null];
@@ -46,12 +59,7 @@ export function verifyPrivateHandle(handle: unknown, requireProtected = false): 
       const sddl = koffi.decode.string16(out[0]);
       const match = /^O:([^:]+)D:([A-Z]*)(\(.*\))?$/.exec(sddl);
       const sid = currentSid();
-      const numericOwner: unknown[] = [null];
-      let ownerSid: string;
-      try {
-        if (!stringifySid?.(owner[0], numericOwner) || !numericOwner[0]) throw new Error('Cannot inspect owner SID');
-        ownerSid = koffi.decode.string16(numericOwner[0]);
-      } finally { if (numericOwner[0]) free?.(numericOwner[0]); }
+      const ownerSid = sidString(owner[0], 'owner');
       if (ownerSid !== sid && ownerSid === 'S-1-5-32-544') {
         throw new AdministratorsOwnedItemError();
       }

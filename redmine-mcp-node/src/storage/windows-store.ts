@@ -38,7 +38,7 @@ function jsonWrite(parent: H, name: string, record: ItemRecord, replace: boolean
   try { verifyPrivateHandle(h); writeHandle(h, Buffer.from(JSON.stringify(record), 'utf8')); flushHandle(h); renameHandle(h, parent, name, replace); renamed = true; if (durable) flushHandle(h); }
   catch (e) { if (!renamed) { try { deleteHandle(h); } catch {} } throw e; } finally { closeHandle(h); }
 }
-export function createWindowsAttachmentStore(options: {root: string; clock?: () => Date}): AttachmentStore & { sweep(now?: Date, signal?: AbortSignal): Promise<void> } {
+export function createWindowsAttachmentStore(options: {root: string; clock?: () => Date}): AttachmentStore & { sweep(now?: Date, signal?: Pick<AbortSignal, 'aborted'>): Promise<void> } {
   if (process.platform !== 'win32' || !path.win32.isAbsolute(options.root)) throw new Error('Windows absolute root required');
   const rootPath = path.win32.resolve(options.root), clock = options.clock ?? (() => new Date());
   const stages = new WeakSet<object>();
@@ -159,8 +159,9 @@ async function writeZip(source: H, output: H, record: ItemRecord): Promise<void>
   await pipeline(zip.outputStream, new Writable({write(chunk: Buffer, _encoding, cb) { try { writeHandle(output, Buffer.from(chunk)); cb(); } catch (e) { cb(e as Error); } }}));
   flushHandle(output); await verifyZip(output, record);
 }
-async function sweepWindows(rootPath: string, openRoot: (handles: H[]) => H, now: Date, signal?: AbortSignal): Promise<void> {
+async function sweepWindows(rootPath: string, openRoot: (handles: H[]) => H, now: Date, signal?: Pick<AbortSignal, 'aborted'>): Promise<void> {
   if (!Number.isFinite(now.getTime())) throw new Error('Invalid sweep time');
+  if (signal?.aborted) return;
   const outer: H[] = [];
   try {
     const root = openRoot(outer); verifyNtfs(root); const global = tryLock(root, '.sweep.lock');
