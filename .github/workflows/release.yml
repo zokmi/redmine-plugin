@@ -61,7 +61,7 @@ jobs:
         working-directory: redmine-mcp-node
         env:
           STORAGE_TEST_PYTHON: ${{ steps.legacy.outputs.python-path }}
-        run: node --test --test-name-pattern="legacy Python cache|Python and Node exchange" tests/posix-store.test.mjs tests/windows-store.test.mjs
+        run: node --test tests/posix-store.test.mjs tests/windows-store.test.mjs tests/windows-handles.test.mjs
 
   release:
     needs: runtime
