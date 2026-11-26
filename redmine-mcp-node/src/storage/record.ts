@@ -6,6 +6,20 @@ export interface ItemRecord {
   size: number; sha256: string; archived_at: string | null; schema_version: 1;
 }
 
+// Python records microseconds. Round up before comparing with the millisecond clock.
+function ceilTimestamp(value: string): number {
+  const fraction = /\.(\d+)\+00:00$/.exec(value)?.[1] ?? '';
+  return Date.parse(value) + (/[1-9]/.test(fraction.slice(3)) ? 1 : 0);
+}
+
+export function isSweepDue(record: ItemRecord, now: number): boolean {
+  const dates = [record.created_at, record.last_used_at, record.archived_at ?? record.created_at];
+  if (dates.some(date => ceilTimestamp(date) > now)) return false;
+  const day = 86_400_000;
+  if (record.state === 'active') return now - ceilTimestamp(record.last_used_at) >= 7 * day;
+  return record.state === 'archive_published' || now - ceilTimestamp(record.archived_at!) >= 30 * day;
+}
+
 function utcTimestamp(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   // Python's isoformat() emits this form. Keep the original microseconds intact.

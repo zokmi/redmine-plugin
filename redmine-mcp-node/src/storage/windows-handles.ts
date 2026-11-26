@@ -121,6 +121,10 @@ export function openFile(parent: Handle, name: string, mode: 'open' | 'create' |
   if (access === 'read' && mode !== 'open') throw new Error('Read-only handle must open an existing file');
   return relative(parent, name, access === 'read' ? 0x80000080 : 0xc0010080, mode === 'open' ? 1 : mode === 'create' ? 2 : 3, false);
 }
+/** Allow foreground replacement during a speculative read of an existing record. */
+export function openReplaceableReadFile(parent: Handle, name: string): Handle {
+  return relative(parent, name, 0x80000080, 1, false, null, 1 | 4); // FILE_SHARE_READ | FILE_SHARE_DELETE
+}
 /** Pins an existing regular file against concurrent write and replacement; caller verifies its ACL. */
 export function openGuardedFile(parent: Handle, name: string): Handle {
   return relative(parent, name, 0x80010080, 1, false, null, 1);
@@ -185,7 +189,15 @@ export function writeHandle(handle: Handle, data: Buffer): void {
   }
 }
 export function flushHandle(handle: Handle): void { if (!flushFile || !flushFile(handle)) throw new Error(`Cannot flush file (${lastError?.()})`); }
-export function renameHandle(handle: Handle, parent: Handle, name: string, replace = false): void {
+const extendedRenameUnsupported = new Set([
+  0xc0000002, // STATUS_NOT_IMPLEMENTED
+  0xc0000003, // STATUS_INVALID_INFO_CLASS
+  0xc000000d, // STATUS_INVALID_PARAMETER
+  0xc0000010, // STATUS_INVALID_DEVICE_REQUEST
+  0xc00000bb, // STATUS_NOT_SUPPORTED
+]);
+export class OpenRecordReaderError extends Error {}
+export function renameHandle(handle: Handle, parent: Handle, name: string, replace = false, allowOpenReaders = false): void {
   if (!ntSet || !name || name === '.' || name === '..' || /[/\\\0:]/.test(name)) throw new Error('Invalid component');
   verifyRegularFile(handle);
   const bytes = Buffer.from(name, 'utf16le');
@@ -193,7 +205,29 @@ export function renameHandle(handle: Handle, parent: Handle, name: string, repla
   const Rename = koffi.struct({ Replace:'int32', Root:'void *', Length:'uint32', Name:koffi.array('uint8', bytes.length) });
   const buffer = Buffer.alloc(koffi.sizeof(Rename));
   koffi.encode(buffer, Rename, {Replace:replace ? 1 : 0, Root:parent, Length:bytes.length, Name:bytes});
-  const result = ntSet(handle, {}, buffer, buffer.length, 10);
+  let result = ntSet(handle, {}, buffer, buffer.length, 10); // FileRenameInformation
+  const accessDenied = 0xc0000022 | 0, sharingViolation = 0xc0000043 | 0;
+  if (replace && allowOpenReaders && (result === accessDenied || result === sharingViolation)) {
+    // A background reader may have pinned the previous record. Verify the target and
+    // acquire DELETE access under normal sharing rules before replacing its directory entry.
+    let target;
+    try { target = relative(parent, name, 0x80010080, 1, false, null, 1 | 4); }
+    catch (error) {
+      if (!(error instanceof Error) || ![accessDenied, sharingViolation].some(status => error.message === `Cannot open entry (NTSTATUS ${status})`)) throw error;
+    }
+    if (target) {
+      try {
+        verifyPrivateHandle(target);
+        buffer.writeUInt32LE(1 | 2); // FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS
+        const extended = ntSet(handle, {}, buffer, buffer.length, 65); // FileRenameInformationEx
+        if (extendedRenameUnsupported.has(extended >>> 0)) {
+          // Foreground refresh can retry a normal rename once the short reader closes.
+          throw new OpenRecordReaderError(`Cannot rename file (NTSTATUS ${result})`);
+        }
+        result = extended;
+      } finally { closeHandle(target); }
+    }
+  }
   if (result < 0) throw new Error(`Cannot rename file (NTSTATUS ${result})`);
 }
 export function deleteHandle(handle: Handle): void {

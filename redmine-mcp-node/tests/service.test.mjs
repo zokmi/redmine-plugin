@@ -9,7 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { fileURLToPath } from 'node:url';
-import { mkdir, mkdtemp, readFile, realpath, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { basename, dirname, join } from 'node:path';
@@ -108,17 +108,32 @@ test('Windows cold start serves authenticated MCP while scanning 220 attachment 
   const elapsed = Math.round(performance.now() - started);
   t.diagnostic(`Authenticated cold initialization: ${elapsed} ms for ${recordCount} records`);
   assert.ok(elapsed < 5000, `Cold initialization exceeded the 5 s health probe: ${elapsed} ms`);
-  assert.ok((await c.listTools()).tools.some(tool => tool.name === 'get_issue'));
+  assert.ok((await c.listTools({}, {timeout: 5000})).tools.some(tool => tool.name === 'get_issue'));
 
   const sitePath = join(root, siteKey);
   const dueRecord = join(sitePath, 'records', idOf(recordCount) + '.json');
+  const archive = idOf(recordCount) + '.zip';
   const deadline = performance.now() + 60_000;
-  while (JSON.parse(await readFile(dueRecord, 'utf8')).state !== 'archived') {
-    assert.ok(performance.now() < deadline, 'Startup sweep did not archive the due record');
-    await delay(100);
-  }
+  const rootHandle = native.openDirectory(root);
+  try {
+    // Wait for the real sweep to release its lock before inspecting the record it replaces.
+    // Looking for the ZIP first ensures this observer cannot suppress the startup sweep.
+    for (;;) {
+      const names = await readdir(join(sitePath, 'archives')).catch(error => {
+        if (error.code === 'ENOENT') return [];
+        throw error;
+      });
+      if (names.includes(archive)) {
+        const idle = native.tryLock(rootHandle, '.sweep.lock');
+        if (idle) { native.closeHandle(idle); break; }
+      }
+      assert.ok(performance.now() < deadline, 'Startup sweep did not finish archiving the due record');
+      await delay(100);
+    }
+  } finally { native.closeHandle(rootHandle); }
+  assert.equal(JSON.parse(await readFile(dueRecord, 'utf8')).state, 'archived');
   assert.deepEqual(await readFile(join(sitePath, 'active', idOf(1), 'sample.txt')), bytes);
-  assert.ok((await readFile(join(sitePath, 'archives', idOf(recordCount) + '.zip'))).length > 0);
+  assert.ok((await readFile(join(sitePath, 'archives', archive))).length > 0);
 });
 
 test('stdio and HTTP download into the existing attachment root and reuse each other’s saved bytes', {timeout: 60_000}, async t => {
