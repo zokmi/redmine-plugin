@@ -137,10 +137,19 @@ def test_一致性報告要求逐項證據與檔案行號_commit():
         assert marker in text, f"一致性報告範例缺少：{marker}"
 
 
-def test_BDD_Redmine_註記模板要求修正項目與圖片一對一():
+def test_BDD_Redmine_註記模板逐條回覆並保留補充區塊():
     text = BDD_NOTE.read_text(encoding="utf-8")
+    example = re.search(r"^```markdown\n(## 修正結果\n.*?)^```$", text, re.MULTILINE | re.DOTALL)
+    assert example, "缺少以修正結果開頭的註記範本"
+    template = example.group(1)
 
-    for marker in ("修正結果", "修正項目 1", "結果：已修正", "圖片 1", "修正項目 2", "圖片 2", "截圖不適用"):
-        assert marker in text, f"BDD 註記模板缺少：{marker}"
+    headings = re.findall(r"^### (.+)$", template, re.MULTILINE)
+    assert [heading.split("：", 1)[0] for heading in headings] == ["修正項目 1", "修正項目 2", "其他資訊補充"]
+    for marker in ("受測版本：", "已修正", "已確認維持", "部分驗證", "未通過", "圖片 1", "圖片 2", "截圖不適用"):
+        assert marker in template, f"BDD 註記模板缺少：{marker}"
+    for field in ("未驗證", "待確認", "圖片說明", "上線注意"):
+        assert f"- {field}：" in template
+    assert "<upload_attachment 回傳的 markdown 原樣>" in template.splitlines()
+    assert "同圖片 N" in text
     for technical in ("驗證情境：", "驗證版本：", "根因："):
-        assert technical not in text, f"PM 註記不應包含技術欄位：{technical}"
+        assert technical not in template, f"驗收結果不應包含技術欄位：{technical}"
