@@ -82,7 +82,7 @@ appsettings.PROD.json：
 只能從該份檢核文件「重大功能檢核清單」裡實際存在的功能模組挑選。
 寫了清單裡沒有的名稱，複檢時找不到對應的 M 編號可以核，這格就白填了。
 
-判斷方式用 `scripts/map_features.py` 把異動檔案對應到前台路由，共用檔與後端則用
+判斷方式用 `scripts/map_features.mjs` 把異動檔案對應到前台路由，共用檔與後端則用
 `codegraph_explore` 回推呼叫端（詳見 SKILL.md 步驟 4）。
 
 - 多個用頓號分隔：`登入、會員註冊`

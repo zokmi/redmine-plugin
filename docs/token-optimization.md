@@ -17,8 +17,9 @@
 
 - get_issue 預設完整模式保持相容；summary=true 只供初步瀏覽，長內文／留言提供 600 字預覽與截斷標記，編輯前重讀完整模式。
 - 摘要查詢省略 include 中的 journals，需要異動紀錄時才指定 include: ["journals"]。
-- journals_offset 從最新紀錄跳過 N 筆，使用回傳 journals_next_offset 往前讀。需完整查核時讀完相關討論，未讀範圍明列待確認。此分批只減少模型回傳量，Redmine 上游仍回傳完整歷程。
-- collect_issue_changes.py --with-diff 預設整批 1200 行／48000 字元，各檔仍最多 400 行；重複 patch 只輸出一次，截斷或省略需按 commit／檔案補讀。可用 --max-total-diff-lines 與 --max-total-diff-chars 調整。
+- `get_issue` 首次讀取 `include: ["journals"]` 時，Redmine 會回傳完整歷程。有更早紀錄時，使用該站的 `journals_next_offset` 作為 `journals_offset`，並帶回該站的 `journals_snapshot`（若有）。沿用相同的 `site`、`issue_id` 和 `include`，即可從同一份資料繼續往前讀。需要完整查核時請讀完相關討論，未讀範圍明列待確認。
+- 快照自建立起可用 60 秒，每個服務最多保留 32 份，資料合計上限為估計 32 MiB。若回傳頁面只有 offset，可用它直接向 Redmine 讀較早紀錄。若已取得的快照過期、被淘汰或因工單寫入而失效，從第一頁重新取得最新資料。
+- `collect_issue_changes.mjs --with-diff` 預設整批 1200 行／48000 字元，各檔仍最多 400 行；重複 patch 只輸出一次，截斷或省略需按 commit／檔案補讀。可用 --max-total-diff-lines 與 --max-total-diff-chars 調整。
 - 兩個 collector 預設緊湊 JSON；人工閱讀可加 --pretty。
 - 版更預設摘要＋TSV＋必檢清單，要求完整表格時才追加，避免重複輸出全文。
 

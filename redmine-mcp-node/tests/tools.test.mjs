@@ -73,7 +73,15 @@ test('MCP tools/list matches all sixteen migrated v0.17.4 tool contracts', async
   const { tools } = await client.listTools();
   const expected = fixture.tools;
   assert.deepEqual(tools.map((tool) => tool.name), expected.map((tool) => tool.name));
-  assert.deepEqual(withoutSchemaTitles(tools), withoutSchemaTitles(expected));
+  // v0.19 adds exactly one optional input. Preserve the captured fixture and compare every other field.
+  const current = withoutSchemaTitles(tools);
+  const schema = current.find(({ name }) => name === 'get_issue').inputSchema;
+  const { journals_snapshot: snapshot } = schema.properties;
+  assert.deepEqual(snapshot?.anyOf, [{ type: 'string' }, { type: 'null' }]);
+  assert.equal(snapshot.default, null);
+  assert.match(snapshot.description, /journals_next_offset/);
+  delete schema.properties.journals_snapshot;
+  assert.deepEqual(current, withoutSchemaTitles(expected));
   assert.deepEqual(client.getServerVersion(), { name: 'redmine', version });
   assert.match(client.getInstructions(), /已設定多個站台：north、south/);
   assert.deepEqual(await call(client, 'list_sites'), { configured_sites: [
@@ -183,6 +191,91 @@ test('issue detail preserves journal pagination, summaries, and per-site lookup 
   const full = await call(client, 'get_issue', { ...args, site: 'hit', journals_offset: 2 });
   assert.equal(full.sites.hit.description, wrapped('😀'.repeat(601)));
   assert.deepEqual(full.sites.hit.custom_fields, { '&lt;Choice&gt;': { id: 3, value: [wrapped('&lt;one&gt;'), 2] } });
+});
+
+test('journal snapshots preserve independent views across pages and MCP sessions', async (t) => {
+  let gets = 0;
+  const registry = createSiteRegistry(settings(['north', 'south']), () => ({
+    async json(method, path) {
+      if (method === 'PUT') return ok();
+      const start = ++gets * 100;
+      return ok({ issue: {
+        id: 42, children: [{ id: 7, subject: 'old' }],
+        journals: Array.from({ length: 10 }, (_, i) => ({ id: start + i })),
+      } });
+    },
+    close() {},
+  }));
+  t.after(() => registry.close());
+  const reader = await connect(t, ['north', 'south'], null, { registry });
+  const writer = await connect(t, ['north', 'south'], null, { registry });
+  const args = { issue_id: 42, site: 'north', include: ['journals', 'children'], journals_limit: 2 };
+  const page = async (options, client = reader) => (await call(client, 'get_issue', { ...args, ...options })).sites[options.site ?? 'north'];
+  const first = await page({});
+  assert.equal(typeof first.journals_snapshot, 'string');
+  let batch = first;
+  const ids = [];
+  for (let n = 0; n < 5; n++) {
+    if (n) batch = await page({ journals_snapshot: first.journals_snapshot, journals_offset: batch.journals_next_offset });
+    ids.push(...batch.journals.map(({ id }) => id));
+  }
+  assert.deepEqual(ids.sort((a,b) => a-b), Array.from({ length: 10 }, (_, i) => 100 + i));
+  assert.equal(gets, 1);
+  const second = await page({});
+  assert.notEqual(second.journals_snapshot, first.journals_snapshot);
+  const continuation = { journals_snapshot: first.journals_snapshot, journals_offset: 2 };
+  assert.equal((await page({ ...continuation, include: ['children', 'journals'] }, writer)).journals[0].id, 106);
+  for (const mismatch of [{site: 'south'}, {issue_id: 43}, {include: ['journals']}]) {
+    assert.match((await page({ ...continuation, ...mismatch })).error, /快照/);
+  }
+  assert.equal(gets, 2);
+  assert.equal((await page({ journals_offset: 2 })).journals[0].id, 306);
+  await call(writer, 'add_issue_note', { site: 'north', issue_id: 7, notes: 'new' });
+  assert.equal((await page(continuation)).journals[0].id, 106);
+  await call(writer, 'update_issue', { site: 'north', issue_id: 7, subject: 'renamed' });
+  assert.match((await page(continuation)).error, /快照/);
+  const fresh = await page({});
+  await call(writer, 'add_issue_note', { site: 'north', issue_id: 42, notes: 'new' });
+  assert.match((await page({ journals_offset: 2, journals_snapshot: fresh.journals_snapshot })).error, /快照/);
+});
+
+test('an in-flight journal GET cannot publish a snapshot after a write to that issue', async (t) => {
+  let release, started;
+  const pending = new Promise(resolve => { release = resolve; });
+  const start = new Promise(resolve => { started = resolve; });
+  const client = await connect(t, ['north'], async (_site, method) => {
+    if (method === 'PUT') return ok();
+    started();
+    await pending;
+    return ok({ issue: { id: 1, journals: [{id: 1}, {id: 2}] } });
+  });
+  const page = call(client, 'get_issue', {issue_id: 1, include: ['journals'], journals_limit: 1});
+  await start;
+  try {
+    await call(client, 'add_issue_note', {issue_id: 1, notes: 'new comment'});
+  } finally { release(); }
+  assert.equal((await page).sites.north.journals_snapshot, undefined);
+});
+
+test('multi-site first pages issue a scoped token per site and reject tokens from another registry', async (t) => {
+  let gets = 0;
+  const get = () => {
+    gets++;
+    return ok({ issue: { id: 42, journals: [{ id: 1 }, { id: 2 }] } });
+  };
+  const firstClient = await connect(t, ['north', 'south'], get);
+  const separateRegistry = await connect(t, ['north'], get);
+  const args = { issue_id: 42, include: ['journals'], journals_limit: 1 };
+  const { sites } = await call(firstClient, 'get_issue', args);
+  assert.notEqual(sites.north.journals_snapshot, sites.south.journals_snapshot);
+  for (const [site, first] of Object.entries(sites)) {
+    const next = { ...args, journals_offset: first.journals_next_offset, journals_snapshot: first.journals_snapshot };
+    await error(firstClient, 'get_issue', next, /site/);
+    assert.deepEqual((await call(firstClient, 'get_issue', { ...next, site })).sites[site].journals.map(j => j.id), [1]);
+  }
+  const result = await call(separateRegistry, 'get_issue', { ...args, journals_offset: 1, journals_snapshot: sites.north.journals_snapshot });
+  assert.match(result.sites.north.error, /快照/);
+  assert.equal(gets, 2);
 });
 
 test('issue writes preserve validation and payload', async (t) => {

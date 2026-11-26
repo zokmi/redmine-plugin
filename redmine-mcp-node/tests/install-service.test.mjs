@@ -45,7 +45,7 @@ test('doctor reports an absent installation from the bundled helper', {skip:proc
   await assert.rejects(access(join(root, 'redmine-mcp')), {code:'ENOENT'});
 });
 
-test('Node opt-in preserves verified context across restart and rollback', {skip:process.platform !== 'win32', timeout:480000}, async t => {
+test('default Node installation without Python preserves verified context across restart and migration rollback', {skip:process.platform !== 'win32', timeout:480000}, async t => {
   const root = await mkdtemp(join(tmpdir(), 'redmine-install-'));
   let pid;
   t.after(async () => { if (pid) { try { process.kill(pid); } catch {} } await rm(root, {recursive:true, force:true, maxRetries:10, retryDelay:200}); });
@@ -129,10 +129,14 @@ function npm.cmd {
   const invoke = (args, expected, extra) =>
     run(pwsh, ['-NoProfile', '-File', script, ...args, ...(args.includes('-Port') ? [] : ['-Port', String(port)])], expected, extra);
   const initialize = () => fetch(`http://127.0.0.1:${port}/mcp`, {method:'POST', headers:{Authorization:`Bearer ${'a'.repeat(32)}`, Accept:'application/json, text/event-stream', 'Content-Type':'application/json'}, body:JSON.stringify({jsonrpc:'2.0', id:1, method:'initialize', params:{protocolVersion:'2025-03-26', capabilities:{}, clientInfo:{name:'fixture',version:'1'}}})});
-  await invoke(['-UseNode']);
+  for (const program of ['python.exe', 'uv.exe']) {
+    assert.throws(() => execFileSync('where.exe', [program], { env, stdio: 'ignore' }), { status: 1 });
+  }
+  await invoke([]);
   const manifest = join(root, 'redmine-mcp', 'service', 'active.json');
   let state = JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, ''));
   pid = state.pid; assert.equal(state.engine, 'node');
+  await assert.rejects(access(join(dirname(manifest), state.deployment, '.venv')), {code:'ENOENT'});
   assert.equal(state.servicePaths.REDMINE_MCP_STORAGE_ROOT, undefined);
   assert.doesNotMatch(JSON.stringify(state), /fixture-key|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
   const attachment = join(storage, 'fixture.bin'); await writeFile(attachment, 'attachment fixture');
@@ -187,9 +191,32 @@ function npm.cmd {
   assert.equal(JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, '')).pid, pid);
   const blocker = createServer().listen(0, '127.0.0.1'); await once(blocker, 'listening');
   const occupied = blocker.address().port; t.after(() => blocker.close());
-  await invoke(['-UseNode', '-Port', String(occupied)], 1);
+  // Model an existing Python deployment's launcher contract without requiring
+  // Python in the test runner. The fixture serves the real authenticated MCP endpoint.
+  const oldDeployment = state.deployment;
+  const oldDir = join(dirname(manifest), oldDeployment);
+  const oldPython = join(oldDir, '.venv', 'Scripts', 'python.exe');
+  await mkdir(dirname(oldPython), {recursive: true});
+  await writeFile(oldPython, 'fixture runtime marker');
+  await writeFile(join(oldDir, 'local-service.mjs'), `
+import { writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+if (process.argv[2] !== ${JSON.stringify(oldPython)}) throw Error('Wrong legacy runtime');
+writeFileSync('legacy-launch.pid', String(process.pid));
+process.argv = [process.execPath, fileURLToPath(new URL('./dist/cli.js', import.meta.url)), 'serve', '--port', process.argv[3]];
+await import('./dist/cli.js');
+`);
+  await writeFile(manifest, JSON.stringify({...state, engine:'python'}));
+  await invoke(['-Port', String(occupied)], 1);
   state = JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, ''));
-  assert.equal(state.engine, 'node'); assert.equal(state.port, port); assert.notEqual(state.pid, pid); pid = state.pid;
+  assert.equal(state.engine, 'python'); assert.equal(state.deployment, oldDeployment);
+  assert.equal(state.port, port); assert.notEqual(state.pid, pid); pid = state.pid;
+  assert.equal(await readFile(join(oldDir, 'legacy-launch.pid'), 'utf8'), String(pid));
+  assert.equal((await initialize()).status, 200);
+  await invoke([]);
+  state = JSON.parse((await readFile(manifest, 'utf8')).replace(/^\uFEFF/, ''));
+  assert.equal(state.engine, 'node'); assert.notEqual(state.deployment, oldDeployment); pid = state.pid;
+  await access(oldPython);
   assert.equal(await readFile(config, 'utf8'), updatedFixture); assert.equal(await readFile(attachment, 'utf8'), 'attachment fixture');
   const initialized = await initialize(); assert.equal(initialized.status, 200); assert.match(await initialized.text(), /serverInfo/);
   assert.equal((await fetch(`http://127.0.0.1:${port}/mcp`)).status, 401);

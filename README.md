@@ -4,14 +4,14 @@
 
 ## 內容
 
-- `redmine-mcp/`：Redmine MCP 原始碼，共 16 個工具，支援多站台與附件。
+- `redmine-mcp-node/` 提供正式的 Node.js MCP 服務、16 個工具、多站台查詢與附件功能。
 - `skills/redmine-issue-writing/`：公司標準 Redmine 單子格式。
 - `skills/issue-code-consistency-check/`：需求與程式異動一致性查核。
 - `skills/release-change-items/`：版更項目與重大功能檢核彙整。
 
 ## 前置需求
 
-安裝支援 plugin 的 Claude Code 或 Codex，以及提供 `uvx` 的 [uv 套件](https://docs.astral.sh/uv/getting-started/installation/)。在執行設定與共用服務的終端機確認 `uvx --version` 可執行。Python 3.13 與 MCP 相依套件由 `uvx` 按需準備，服務使用 plugin 內附原始碼。
+安裝支援 plugin 的 Claude Code 或 Codex、Node.js 22 以上及 npm。在執行設定與共用服務的終端機，用 `node --version` 與 `npm --version` 確認版本。
 
 ## 安裝到 Claude Code
 
@@ -54,9 +54,9 @@ Codex 與 Claude 的 Redmine plugin 都連到 `http://127.0.0.1:18765/mcp`。服
 & '<已安裝 plugin 根目錄>/scripts/install-local-service.ps1'
 ```
 
-預設腳本需要 Node.js 22 以上和 `uv`，會把服務與依賴安裝到目前使用者的 `%LOCALAPPDATA%\redmine-mcp\service`，並無視窗啟動 Node.js。Python worker 退出後，Node.js 保留共用端點並在兩秒後重啟 worker。復原期間端點回傳 HTTP 503，恢復後可在 Claude Code 使用 `/mcp` 重新連線。
+v0.19.0 起，直接執行上方腳本即可安裝或升級到 Node.js。腳本依 npm 鎖檔建置新部署，沿用目前的站台設定、服務權杖與附件目錄。舊部署會保留供升級失敗時回復。使用舊 Python 部署者請在遷移成功前保留該部署的執行環境。
 
-v0.18.0 提供可選用的 Windows Node 原生執行環境：以 `-UseNode` 執行安裝腳本，會以 npm 鎖定相依套件建置並啟動候選版本，不需要 Python 或 uv。重啟時使用 `-Restart`，它會沿用目前安裝的執行環境。此版本已通過 Codex、Claude Code、兩站查詢與附件驗證；預設安裝仍使用 Python，macOS／Linux 沿用既有服務。
+服務安裝於目前使用者的 `%LOCALAPPDATA%\redmine-mcp\service`。Node.js worker 退出後，共用端點會在兩秒後重啟 worker。復原期間端點回傳 HTTP 503。既有自動化可繼續使用 `-UseNode`。`-Restart` 會重啟已安裝的引擎；從 Python 升級時請執行不加參數的安裝命令。
 
 當 agent 發現 MCP 的 `ECONNREFUSED`、重連失敗或啟動逾時時，使用 `redmine-doctor` skill 執行診斷。Windows 可以從已安裝 plugin 直接執行：
 
@@ -84,30 +84,36 @@ v0.18.5 起，安裝或成功重啟會以 Windows 目前使用者的 DPAPI 加�
 
 ### macOS／Linux
 
-將 `REDMINE_MCP_LOCAL_TOKEN` 設定到服務及客戶端的環境，再以前景命令啟動。若需要登出終端機後持續運作，請交由系統的使用者服務管理器執行同一命令。
+首次安裝與每次更新 plugin 後，在已安裝的套件目錄建置 Node.js 服務。已有站台設定可直接沿用。
 
 ```sh
-uvx --python 3.13 --from '<已安裝 plugin 根目錄>/redmine-mcp' redmine-mcp serve
+runtime='<已安裝 plugin 根目錄>/redmine-mcp-node'
+npm --prefix "$runtime" ci --no-audit --no-fund
+npm --prefix "$runtime" run build
+# 首次設定站台時執行
+node "$runtime/dist/cli.js" setup
 ```
+
+將同一個 `REDMINE_MCP_LOCAL_TOKEN` 設定到服務、Codex 和 Claude 的環境。升級時沿用現有權杖。首次啟用時可用 `node -p "require('node:crypto').randomBytes(32).toString('base64url')"` 在自己的終端機產生權杖。停止舊服務後，在上述終端機執行 `node "$runtime/dist/cli.js" serve`。若使用系統的使用者服務管理器，將它的啟動命令改為 Node 與 `dist/cli.js serve` 的絕對路徑。
 
 ## 更新與移除
 
 遇到連接埠占用時，先確認監聽程序的身分。切換或更新共用服務會中斷連線，請選擇兩個客戶端都沒有進行 Redmine 操作的時段。
 
-新版本發布後，透過 plugin 管理器更新 marketplace 與 plugin，重開工具載入新版本。發布前同步更新 `plugin.json`、`.claude-plugin/plugin.json`、`.codex-plugin/plugin.json` 、`redmine-mcp/pyproject.toml`、`redmine-mcp/uv.lock` 及 Node 套件與鎖檔的版本，避免舊版本快取。
+新版本發布後，透過 plugin 管理器更新 marketplace 與 plugin，再更新本機共用服務並重開客戶端。
 
 Claude Code 可在 `/plugin` 的 Installed 管理更新與移除；Codex 使用 plugin 管理介面，或 `codex plugin remove redmine@redmine-plugins`。若不再使用 Windows 共用服務，可停止服務程序。若不再使用 Redmine，可自行刪除上述參數檔。
 
 ## GitHub Release
 
-發布前同步更新 `plugin.json`、`.claude-plugin/plugin.json`、`.codex-plugin/plugin.json`、`redmine-mcp/pyproject.toml` 與 `redmine-mcp-node/package.json` 的版本，並更新 `redmine-mcp/uv.lock` 與 `redmine-mcp-node/package-lock.json`。將變更提交到 `main` 後，建立對應 tag：
+發布前同步更新三個 plugin manifest、`redmine-mcp-node/package.json` 與 `redmine-mcp-node/package-lock.json` 的版本，以 `node scripts/check-plugin-release.mjs vMAJOR.MINOR.PATCH` 驗證，再將已驗證的提交與對應 tag 推送到 `main`。
 
 ```sh
-git tag -a v0.14.2 -m "Redmine plugin v0.14.2"
-git push origin v0.14.2
+git tag -a v0.19.0 -m "Redmine plugin v0.19.0"
+git push origin v0.19.0
 ```
 
-`vMAJOR.MINOR.PATCH` tag 會觸發 Release workflow：確認 tag 位於 `main`、各套件與鎖檔版本一致、plugin 資源存在，通過 Windows 服務恢復及 Linux 的 Node／Python 測試後建立 GitHub Release 並自動產生發行說明。安裝仍透過 plugin marketplace；Release 不提供舊版獨立安裝包。範例版本請換成實際版本。
+`vMAJOR.MINOR.PATCH` tag 會觸發 Release workflow。工作流程驗證 tag 位於 `main`、版本與資源一致，通過 Node 測試後建立 GitHub Release。安裝仍透過 plugin marketplace。範例版本請換成實際版本。
 
 若 tag 已推送但 Release 尚未建立，可在 Actions 手動執行 Release workflow，輸入既有 tag。
 
@@ -117,7 +123,7 @@ ZIP 安裝腳本、獨立 CLI 安裝命令與手動複製 skills 的方式已移
 
 ## 維護與驗證
 
-`redmine-mcp/` 的 Python 套件保留作為 plugin 的執行元件與開發測試用途，不提供獨立安裝流程。`redmine-issue-skills/` 保留格式參考與既有測試資料，plugin 技能來源為 `skills/`。
+`redmine-mcp/` 保留已棄用的 Python v0.18.6 原始碼，供舊部署診斷與比對。正式版本、設定命令及服務由 `redmine-mcp-node/` 提供。`redmine-issue-skills/` 保留格式參考與既有測試資料，plugin 技能來源為 `skills/`。
 
 Plugin 格式參考：[OpenAI plugin 文件](https://developers.openai.com/plugins/build/plugins)、[Claude Code plugin 文件](https://code.claude.com/docs/en/plugins-reference)。
 

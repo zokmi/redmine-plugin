@@ -1,4 +1,15 @@
-﻿[CmdletBinding()]
+﻿<#
+.SYNOPSIS
+Installs or upgrades the local Redmine MCP service using Node.js.
+.PARAMETER UseNode
+Compatibility switch for existing installation commands. Ordinary installs and upgrades use Node.js.
+.PARAMETER Restart
+Restarts the recorded deployment with its installed engine. For a legacy Python service,
+use this for recovery or to adopt changed settings, then run the installer normally to migrate.
+.PARAMETER Doctor
+Diagnoses and, when possible, recovers the installed engine in its recorded context.
+#>
+[CmdletBinding()]
 param([switch]$AdoptEnvironment, [switch]$Restart, [switch]$Doctor, [switch]$UseNode, [ValidateRange(1,65535)][int]$Port = 18765)
 $ErrorActionPreference = 'Stop'
 if ($AdoptEnvironment -and (-not $Restart -or $Doctor)) { throw '-AdoptEnvironment requires -Restart and cannot be used with -Doctor.' }
@@ -221,7 +232,7 @@ if (-not $Doctor -and $old) {
     if ($old.port -and ($Restart -or -not $PSBoundParameters.ContainsKey('Port'))) { $Port = [int]$old.port }
 }
 $reuseDeployment = $Restart -or $Doctor
-$engine = if ($reuseDeployment) { if ($old.engine) { $old.engine } else { 'python' } } elseif ($UseNode) { 'node' } else { 'python' }
+$engine = if (-not $reuseDeployment) { 'node' } elseif ($old.engine) { $old.engine } else { 'python' }
 $id = if ($reuseDeployment) { $old.deployment } else { [Guid]::NewGuid().ToString('N') }
 $deployment = Join-Path $serviceRoot $id
 function Validate-Runtime($item) {
@@ -407,7 +418,9 @@ function Invoke-ServiceDoctor($item) {
 function Install-DoctorHelper {
     $doctorRoot = Join-Path $serviceRoot 'doctor'
     $null = New-Item -ItemType Directory -Path $doctorRoot -Force
-    foreach ($name in 'validate-service-config.mjs','validate-service-config.py','install-local-service.ps1','doctor.ps1') {
+    $helpers = @('validate-service-config.mjs','install-local-service.ps1','doctor.ps1')
+    if ($engine -eq 'python') { $helpers += 'validate-service-config.py' }
+    foreach ($name in $helpers) {
         $source = Join-Path $PSScriptRoot $name
         $target = Join-Path $doctorRoot $name
         if ($source -ine $target) {
@@ -426,22 +439,14 @@ if ($Doctor) {
 }
 if (-not $Restart) {
     $null = New-Item -ItemType Directory -Path $deployment -Force
-    if ($engine -eq 'node') {
-        $source = Join-Path $PSScriptRoot '../redmine-mcp-node'
-        foreach ($name in 'package.json','package-lock.json','tsconfig.json','src') { Copy-Item -LiteralPath (Join-Path $source $name) -Destination $deployment -Recurse }
-        Push-Location $deployment
-        try {
-            & npm.cmd ci --no-audit --no-fund; if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
-            & npm.cmd run build; if ($LASTEXITCODE -ne 0) { throw 'Node build failed.' }
-            & npm.cmd prune --omit=dev --no-audit --no-fund; if ($LASTEXITCODE -ne 0) { throw 'npm prune failed.' }
-        } finally { Pop-Location }
-    } else {
-        $source = Join-Path $PSScriptRoot '../redmine-mcp'
-        foreach ($name in 'pyproject.toml','uv.lock','README.md','LICENSE','src') { Copy-Item -LiteralPath (Join-Path $source $name) -Destination $deployment -Recurse }
-        $uv = (Get-Command uv.exe -CommandType Application | Select-Object -First 1).Source
-        & $uv sync --project $deployment --python 3.13 --locked --no-dev; if ($LASTEXITCODE -ne 0) { throw 'uv sync failed.' }
-        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'local-service.mjs') -Destination $deployment
-    }
+    $source = Join-Path $PSScriptRoot '../redmine-mcp-node'
+    foreach ($name in 'package.json','package-lock.json','tsconfig.json','src') { Copy-Item -LiteralPath (Join-Path $source $name) -Destination $deployment -Recurse }
+    Push-Location $deployment
+    try {
+        & npm.cmd ci --no-audit --no-fund; if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
+        & npm.cmd run build; if ($LASTEXITCODE -ne 0) { throw 'Node build failed.' }
+        & npm.cmd prune --omit=dev --no-audit --no-fund; if ($LASTEXITCODE -ne 0) { throw 'npm prune failed.' }
+    } finally { Pop-Location }
 }
 $item = @{ deployment=$id; engine=$engine; contextVersion=2 }
 Validate-Runtime $item

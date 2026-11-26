@@ -1,6 +1,7 @@
 import { isObject, neutralizeUntrustedMarkers, object, paginated, records, wrapUntrusted, type JsonObject } from '../formatting.js';
 import { formatIssueDetail, formatIssueRow } from '../issue-formatting.js';
 import { attachUploads, issuePayload, uncheckedFields, verifyPayload, warningFor } from '../issue-writes.js';
+import { journalSnapshots } from '../journal-snapshots.js';
 import { clampLimit, fanOut, redactSiteSecret, requestJson, requestObject, type SiteRegistry } from '../sites.js';
 import { contracts } from '../tool-contracts.js';
 import { ToolError, type ToolRegistry } from '../tool-registry.js';
@@ -8,6 +9,8 @@ import { TransportError } from '../transport.js';
 
 const ALLOWED_INCLUDES = ['journals', 'attachments', 'relations', 'children', 'watchers'];
 const MAX_TOTAL_ROWS = 200;
+// These changes can affect ancestor rollups or move a child between parents.
+const hierarchyFields = new Set(['parent_issue_id', 'start_date', 'due_date', 'priority_id', 'done_ratio', 'status_id']);
 const createNextStep =
   '若使用者已授權發布診斷或評估，且有可查證的事實，' +
   '依後段模板（bug 用 stage=diagnose，change 用 stage=assess）撰寫，' +
@@ -19,6 +22,7 @@ const createNextStep =
   'update_issue 回頭改寫概述，資料表與關聯（stage=assess）寫進 DB 子單的概述。';
 
 export function registerIssues(tools: ToolRegistry, sites: SiteRegistry, timeoutMs?: number): void {
+  const snapshots = journalSnapshots(sites);
   tools.register(contracts.list_issues, async ({
     site, limit, subject_keyword: subject, custom_field_filters: filters, ...queryFields
   }, signal) => {
@@ -45,16 +49,24 @@ export function registerIssues(tools: ToolRegistry, sites: SiteRegistry, timeout
     };
   });
 
-  tools.register(contracts.get_issue, async ({ issue_id, site, include, ...options }, signal) => {
+  tools.register(contracts.get_issue, async ({ issue_id, site, include, journals_snapshot: token, ...options }, signal) => {
     const invalid = (include ?? []).filter((name) => !ALLOWED_INCLUDES.includes(name)).map(neutralizeUntrustedMarkers);
     if (invalid.length) {
       throw new ToolError(`不支援的 include 值：${invalid.join(', ')}；可用值為 ${ALLOWED_INCLUDES.join(', ')}`);
     }
     const query = include?.length ? { include: include.join(',') } : {};
-    const result = await fanOut(sites.resolve(site), async (target, signal) => {
-      const raw = await requestObject(target, 'GET', `/issues/${issue_id}.json`, { signal, query });
-      if (!isObject(raw.issue)) throw new Error('Invalid issue response');
-      return formatIssueDetail(raw.issue, options);
+    const targets = sites.resolve(site);
+    if (token !== null && targets.size !== 1) throw new ToolError('跨站結果各有自己的歷程快照，續讀時請指定該快照的 site');
+    const includes = [...new Set(include)].sort().join(',');
+    const result = await fanOut(targets, async (target, signal) => {
+      const load = async () => {
+        const raw = await requestObject(target, 'GET', `/issues/${issue_id}.json`, { signal, query });
+        if (!isObject(raw.issue)) throw new Error('Invalid issue response');
+        return raw.issue;
+      };
+      const format = (issue: JsonObject) => formatIssueDetail(issue, options);
+      if (token === null && !include?.includes('journals')) return format(await load());
+      return snapshots.page({ site: target, issueId: issue_id, includes }, token, signal, load, format);
     }, { signal, timeoutMs, noneOnNotFound: true });
     return { issue_id, found_in: result.foundIn, sites: result.payload };
   });
@@ -72,7 +84,8 @@ export function registerIssues(tools: ToolRegistry, sites: SiteRegistry, timeout
       }
       issue.assigned_to_id = id;
     }
-    const raw = await requestObject(target, 'POST', '/issues.json', { signal, body: { issue } });
+    const raw = await requestObject(target, 'POST', '/issues.json', { signal, body: { issue } })
+      .finally(() => snapshots.invalidate(target));
     const created = object(raw.issue);
     const verified = verifyPayload(issue, created);
     return {
@@ -89,7 +102,9 @@ export function registerIssues(tools: ToolRegistry, sites: SiteRegistry, timeout
     const keys = Object.keys(issue).sort();
     if (!keys.length) throw new ToolError('至少要提供一個要更新的欄位');
     const path = `/issues/${issue_id}.json`;
-    await requestJson(target, 'PUT', path, { signal, body: { issue } });
+    const affectedIssue = keys.some(key => hierarchyFields.has(key)) ? undefined : issue_id;
+    await requestJson(target, 'PUT', path, { signal, body: { issue } })
+      .finally(() => snapshots.invalidate(target, affectedIssue, keys.includes('subject')));
     const unchecked = uncheckedFields(issue);
     let verified: ReturnType<typeof verifyPayload>;
     if (keys.length === unchecked.length) {
@@ -116,7 +131,8 @@ export function registerIssues(tools: ToolRegistry, sites: SiteRegistry, timeout
     if (!notes.trim()) throw new ToolError('notes 不可為空白');
     const issue: JsonObject = { notes, ...(private_notes && { private_notes }) };
     const attached = attachUploads(issue, uploads);
-    await requestJson(target, 'PUT', `/issues/${issue_id}.json`, { signal, body: { issue } });
+    await requestJson(target, 'PUT', `/issues/${issue_id}.json`, { signal, body: { issue } })
+      .finally(() => snapshots.invalidate(target, issue_id));
     return { site: siteName, issue_id, note_added: true, uploads: attached };
   });
 }

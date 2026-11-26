@@ -1,5 +1,7 @@
 # Redmine MCP Server
 
+此目錄是已棄用的 Python v0.18.6 實作。從 v0.19.0 開始，安裝、設定與升級請依[主套件說明](../README.md)使用 Node.js。以下內容供仍在使用舊部署的人員參考。
+
 這個 MCP server 是根目錄 Redmine plugin 的執行元件，提供 Redmine issue、專案、附件與 metadata 的查詢及維護能力，共 16 個工具，支援多個 Redmine 站台。
 
 請先依 [根目錄 README](../README.md) 安裝 plugin，再依 [SETUP.md](SETUP.md) 建立站台參數。用 `uvx --from` 載入外掛內附套件並執行 `redmine-mcp serve`，即可讓 Claude Code 和 Codex 連到同一個本機服務。

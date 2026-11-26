@@ -118,6 +118,54 @@ test('setup refuses unmasked key input and leaves missing config untouched', asy
   } finally { await rm(dir,{recursive:true,force:true}); }
 });
 
+test('interactive setup converts legacy TOML, verifies the saved key and preserves unrelated settings', async () => {
+  const { createServer } = await import('node:http');
+  const { spawn } = await import('node:child_process');
+  const { readFile, stat } = await import('node:fs/promises');
+  const dir = await mkdtemp(join(tmpdir(), 'redmine-cli-'));
+  const server = createServer((req, res) => {
+    assert.equal(req.url, '/users/current.json');
+    assert.equal(req.headers['x-redmine-api-key'], 'setup-fixture-key');
+    res.setHeader('content-type', 'application/json');
+    res.end('{"user":{"login":"fixture"}}');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  let child;
+  try {
+    const url = `http://127.0.0.1:${server.address().port}`;
+    const file = join(dir, 'config.toml');
+    await writeFile(file, `# existing comment\nmax_attachment_mb = 12\nurl = "${url}"\napi_key = "setup-fixture-key"\nallow_insecure_http = true\n`);
+    const tty = "Object.defineProperty(process.stdin,'isTTY',{value:true});Object.defineProperty(process.stdout,'isTTY',{value:true})";
+    child = spawn(process.execPath, ['--import', 'data:text/javascript,' + encodeURIComponent(tty), 'dist/cli.js', 'setup'], {
+      env: { ...process.env, REDMINE_CONFIG: file }, stdio: ['pipe', 'pipe', 'pipe'], signal: AbortSignal.timeout(15000)
+    });
+    const answers = [['偵測到舊格式', 'y'], ['站台代號', 'default'], ['Redmine HTTPS 網址', ''], ['沿用現有金鑰', 'y'], ['確認寫入嗎', 'y']];
+    let output = '', pending = '', stderr = '';
+    child.stdout.setEncoding('utf8').on('data', chunk => {
+      output += chunk;
+      pending += chunk;
+      if (answers.length && pending.includes(answers[0][0])) {
+        pending = '';
+        child.stdin.write(answers.shift()[1] + '\n');
+      }
+    });
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    const status = await new Promise((resolve, reject) => { child.once('error', reject); child.once('close', resolve); });
+    assert.equal(status, 0, stderr);
+    assert.equal(answers.length, 0);
+    assert.doesNotMatch(output + stderr, /setup-fixture-key/);
+    const updated = await readFile(file, 'utf8');
+    assert.match(updated, /# existing comment\nmax_attachment_mb = 12/);
+    assert.match(updated, /\[sites\.default\]/);
+    assert.match(updated, /api_key = "setup-fixture-key"/);
+    if (process.platform !== 'win32') assert.equal((await stat(file)).mode & 0o777, 0o600);
+  } finally {
+    child?.kill();
+    await new Promise(resolve => server.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 
 test('private config creation creates missing parent without inheriting an open ACL', {skip:process.platform !== 'win32'}, async () => {
   const { writePrivate } = await import('../dist/config-write.js');
@@ -199,7 +247,7 @@ test('removing a site retains its standalone and inline comments', async () => {
   } finally { await rm(dir,{recursive:true,force:true}); }
 });
 
-test('snapshot rejects replacement even when external contents are identical', {skip:process.platform !== 'win32'}, async () => {
+test('snapshot rejects replacement even when external contents are identical', async () => {
   const {captureSnapshot,writePrivate} = await import('../dist/config-write.js'); const dir = await mkdtemp(join(tmpdir(), 'redmine-cli-'));
   try {
     const {rename,readFile} = await import('node:fs/promises'); const file=join(dir,'config.toml'); const replacement=join(dir,'replacement');
@@ -208,7 +256,7 @@ test('snapshot rejects replacement even when external contents are identical', {
   } finally { await rm(dir,{recursive:true,force:true}); }
 });
 
-test('snapshot of missing config never replaces a newly created config', {skip:process.platform !== 'win32'}, async () => {
+test('snapshot of missing config never replaces a newly created config', async () => {
   const {captureSnapshot,writePrivate} = await import('../dist/config-write.js'); const dir = await mkdtemp(join(tmpdir(), 'redmine-cli-'));
   try {
     const {readFile} = await import('node:fs/promises'); const file=join(dir,'config.toml'); const snapshot=captureSnapshot(file);

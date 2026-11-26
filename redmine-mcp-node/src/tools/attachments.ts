@@ -1,6 +1,7 @@
 import { basename, extname } from 'node:path';
 import { createRequire } from 'node:module';
 import { finished } from 'node:stream/promises';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 const lookupMime = (createRequire(import.meta.url)('mime-types') as { lookup(name: string): string | false }).lookup;
 import { formatAttachment, isObject, object, records, neutralizeUntrustedMarkers } from '../formatting.js';
 import { fanOut, requestObject, type SiteRegistry } from '../sites.js';
@@ -12,33 +13,58 @@ function filename(value: string): string {
   const name = value.replaceAll('\\', '/').split('/').pop()!.replace(/[\x00-\x1f\x7f<>:"|?*]/g, '').trim().replace(/^\.+|\.+$/g, '');
   return name || 'attachment';
 }
-function image(payload: string, max: number): [Buffer, string, string] {
-  // Stream over the input once. Never allocate a normalized copy larger than the limit.
-  const whitespace = (c: number) => (c >= 9 && c <= 13) || (c >= 28 && c <= 32) || c === 0x85 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000;
-  let pos = 0;
-  while (pos < payload.length && whitespace(payload.charCodeAt(pos))) pos++;
-  // The data URI prefix is consumed without copying the potentially unbounded MIME label.
+const IMAGE_CHUNK = 64 * 1024;
+// Python's str.isspace() also accepts U+001C–U+001F and excludes the BOM.
+const whitespace = /[\p{White_Space}\u001c-\u001f]+/gu;
+const nonWhitespace = /[^\p{White_Space}\u001c-\u001f]/u;
+
+async function findInChunks(payload: string, start: number, pattern: RegExp, signal: AbortSignal): Promise<number> {
+  for (let pos = start; pos < payload.length; pos += IMAGE_CHUNK) {
+    if (pos > start) await nextTurn(undefined, { signal });
+    const match = payload.slice(pos, pos + IMAGE_CHUNK).search(pattern);
+    if (match !== -1) return pos + match;
+  }
+  return payload.length;
+}
+
+async function image(payload: string, max: number, signal: AbortSignal): Promise<[Buffer, string, string]> {
+  signal.throwIfAborted();
+  let pos = await findInChunks(payload, 0, nonWhitespace, signal);
   if (payload.slice(pos, pos + 5).toLowerCase() === 'data:') {
-    let cursor = pos + 5;
-    while (cursor < payload.length && payload[cursor] !== ';' && payload[cursor] !== ',') cursor++;
+    const cursor = await findInChunks(payload, pos + 5, /[;,]/, signal);
     if (payload.slice(cursor, cursor + 8).toLowerCase() === ';base64,') pos = cursor + 8;
   }
-  const chunks: string[] = []; let chunk = ''; let count = 0; let padding = 0;
+  const chunks: string[] = [];
+  let count = 0, padding = 0;
   const cap = Math.ceil(max / 3) * 4 + 4;
-  for (; pos < payload.length; pos++) {
-    const code = payload.charCodeAt(pos);
-    if (whitespace(code)) continue;
-    if (++count > cap) throw new ToolError('圖片內容超過大小上限');
-    const char = payload[pos];
-    if (char === '=') { if (++padding > 2) throw new ToolError('content_base64 不是合法的 base64 內容'); }
-    else if (padding || !((code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || char === '+' || char === '/')) throw new ToolError('content_base64 不是合法的 base64 內容');
-    chunk += char;
-    if (chunk.length === 4096) { chunks.push(chunk); chunk = ''; }
+  for (let offset = pos; offset < payload.length; offset += IMAGE_CHUNK) {
+    if (offset > pos) await nextTurn(undefined, { signal });
+    const clean = payload.slice(offset, offset + IMAGE_CHUNK).replace(whitespace, '');
+    if (!clean) continue;
+    // Match the single-character parser's error order even at the size boundary.
+    const allowed = clean.slice(0, cap - count);
+    const padAt = allowed.indexOf('=');
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(allowed) || (padding && /[^=]/.test(allowed))) {
+      throw new ToolError('content_base64 不是合法的 base64 內容');
+    }
+    if (padAt !== -1) padding += allowed.length - padAt;
+    if (padding > 2) throw new ToolError('content_base64 不是合法的 base64 內容');
+    if (allowed.length < clean.length) throw new ToolError('圖片內容超過大小上限');
+    count += clean.length;
+    chunks.push(clean);
   }
   if (!count || count % 4 !== 0 || (padding && count < 4)) throw new ToolError('content_base64 不是合法的 base64 內容');
-  chunks.push(chunk);
-  const data = Buffer.from(chunks.join(''), 'base64');
-  if (!data.length || data.length > max) throw new ToolError('圖片內容為空或超過大小上限');
+  const size = count / 4 * 3 - padding;
+  if (!size || size > max) throw new ToolError('圖片內容為空或超過大小上限');
+  const data = Buffer.allocUnsafe(size);
+  let carry = '', written = 0;
+  for (const chunk of chunks) {
+    if (written) await nextTurn(undefined, { signal });
+    const encoded = carry + chunk;
+    const end = encoded.length - encoded.length % 4;
+    written += data.write(encoded.slice(0, end), written, 'base64');
+    carry = encoded.slice(end);
+  }
   if (data.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return [data, 'image/png', '.png'];
   if (data.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))) return [data, 'image/jpeg', '.jpg'];
   if (['GIF87a', 'GIF89a'].includes(data.subarray(0, 6).toString())) return [data, 'image/gif', '.gif'];
@@ -86,7 +112,7 @@ export function registerAttachments(tools: ToolRegistry, sites: SiteRegistry, st
     if (file_path && content_base64) throw new ToolError('file_path 與 content_base64 只能給一個');
     let bytes: Uint8Array, contentType: string, display: string;
     if (content_base64) {
-      let ext: string; [bytes, contentType, ext] = image(content_base64, target.settings.maxAttachmentBytes);
+      let ext: string; [bytes, contentType, ext] = await image(content_base64, target.settings.maxAttachmentBytes, signal);
       const candidate = filename(requested || 'attachment'); const suffix = extname(candidate).toLowerCase();
       display = suffix === ext || (ext === '.jpg' && suffix === '.jpeg') ? candidate : (suffix ? candidate.slice(0, -suffix.length) : candidate) + ext;
     } else if (file_path) {

@@ -129,6 +129,48 @@ test('base64 accepts Python whitespace and data URI', async () => {
   assert.equal(result.filename, 'x.png'); assert.equal(result.bytes, 8);
 });
 
+test('large image decoding lets a queued attachment query finish before transport upload', async () => {
+  const raw = Buffer.alloc(2 * 1024 * 1024);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(raw);
+  const encoded = raw.toString('base64');
+  const calls = [];
+  const handlers = await directHandlers({
+    max: raw.length,
+    json: async () => ({ data: { issue: { attachments: [] } } }),
+    upload: async (_name, bytes) => {
+      calls.push('upload');
+      assert.deepEqual(bytes, raw);
+      return { data: { upload: { token: 'ok' } } };
+    },
+  });
+  const signal = new AbortController().signal;
+  const query = new Promise((resolve, reject) => setImmediate(() => {
+    handlers.get('list_attachments')({ issue_id: 1, site: 'one' }, signal)
+      .then(() => { calls.push('query'); resolve(); }, reject);
+  }));
+  const wrapped = 'data:image/png;base64,' + encoded.match(/.{1,77}/g).join('\u0085');
+  await Promise.all([handlers.get('upload_attachment')({ content_base64: wrapped }, signal), query]);
+  assert.deepEqual(calls, ['query', 'upload']);
+});
+
+test('large upload cancellation and malformed padding never reach the transport', async () => {
+  const raw = Buffer.alloc(1024 * 1024, 0);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(raw);
+  const encoded = raw.toString('base64');
+  let uploads = 0;
+  const handlers = await directHandlers({ max: raw.length, upload: async () => {
+    uploads++; return { data: { upload: { token: 'unexpected' } } };
+  } });
+  const upload = handlers.get('upload_attachment');
+  const controller = new AbortController();
+  setImmediate(() => controller.abort());
+  await assert.rejects(upload({ content_base64: encoded }, controller.signal), { name: 'AbortError' });
+  for (const invalid of [encoded + 'A', encoded.slice(0, 65535) + '=' + encoded.slice(65536), encoded + '\uFEFF']) {
+    await assert.rejects(upload({ content_base64: invalid }, new AbortController().signal), /base64/);
+  }
+  assert.equal(uploads, 0);
+});
+
 test('cancel during staging skips transport and discards', async () => {
   let discarded = 0, downloads = 0; const controller = new AbortController();
   const handlers = await directHandlers({ json: async () => ({ data: { attachment: { content_url: 'https://one.invalid/file' } } }), download: async () => { downloads++; return 1; }, store: { async stageDownload() { controller.abort(); return { writer: {} }; }, async discard() { discarded++; } } });
