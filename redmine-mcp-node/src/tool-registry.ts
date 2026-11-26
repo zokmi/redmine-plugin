@@ -4,6 +4,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { isObject, neutralizeUntrustedMarkers, type JsonObject } from './formatting.js';
 import { TransportError } from './transport.js';
+import { AdministratorsOwnedItemError } from './storage/store.js';
 
 export const READ_ONLY = { readOnlyHint: true } satisfies ToolAnnotations;
 export const WRITE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false } satisfies ToolAnnotations;
@@ -140,6 +141,9 @@ export function bindToolRegistry(mcp: McpServer, redact: (text: string) => strin
       const result = await tool.run(params.arguments ?? {}, signal);
       return { structuredContent: result, content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
+      if (error instanceof AdministratorsOwnedItemError) {
+        return failure(`Error executing tool ${name}: ${AdministratorsOwnedItemError.diagnostic}`);
+      }
       const message = error instanceof ToolError || error instanceof TransportError
         ? error.message
         : '執行 Redmine 工具時發生非預期錯誤';

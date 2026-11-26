@@ -4,6 +4,35 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createServer } from '../dist/server.js';
 
+test('tools/call reports the known Windows cache owner issue and hides other storage errors', async (t) => {
+  const { AdministratorsOwnedItemError } = await import('../dist/storage/store.js');
+  const settings = { sites: new Map([['one', { name: 'one', url: 'https://one.invalid',
+    apiKey: 'fixture-key', maxAttachmentBytes: 100, allowInsecureHttp: false, attachmentUploadRoot: null }]]) };
+  const store = {
+    async stageDownload() { throw new AdministratorsOwnedItemError(); },
+    async borrowSource(path) {
+      if (path === 'legacy') throw new AdministratorsOwnedItemError();
+      throw new Error('private path and internal failure');
+    },
+  };
+  const server = createServer(settings, { attachmentStore: store, transportFactory: () => ({
+    close() {}, async json() { return { status: 200, data: { attachment: { filename: 'file', content_url: 'https://one.invalid/file' } } }; },
+  }) });
+  const client = new Client({ name: 'owner-test', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  t.after(async () => { await client.close(); await server.close(); });
+  await server.connect(b); await client.connect(a);
+  for (const [name, args] of [['upload_attachment', { file_path: 'legacy' }], ['download_attachment', { attachment_id: 1 }]]) {
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /owned by the Windows Administrators group/);
+  }
+  const unknown = await client.callTool({ name: 'upload_attachment', arguments: { file_path: 'unknown' } });
+  assert.equal(unknown.isError, true);
+  assert.match(unknown.content[0].text, /非預期錯誤/);
+  assert.doesNotMatch(unknown.content[0].text, /private path/);
+});
+
 test('download publishes actual HTTP bytes through the Windows store', { skip: process.platform !== 'win32', timeout: 10000 }, async (t) => {
   const { createServer: httpServer } = await import('node:http');
   const { once } = await import('node:events');

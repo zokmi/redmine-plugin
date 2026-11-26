@@ -56,6 +56,8 @@ Codex 與 Claude 的 Redmine plugin 都連到 `http://127.0.0.1:18765/mcp`。服
 
 v0.19.0 起，直接執行上方腳本即可安裝或升級到 Node.js。腳本依 npm 鎖檔建置新部署，沿用目前的站台設定、服務權杖與附件目錄。舊部署會保留供升級失敗時回復。使用舊 Python 部署者請在遷移成功前保留該部署的執行環境。
 
+Windows 附件目錄與其中的檔案必須由執行服務的使用者擁有。若舊 Python 曾以提升權限執行，部分目錄、鎖檔或附件可能屬於內建的 Administrators 群組。Node 讀取這些項目時會拒絕並回報 `owned by the Windows Administrators group`。請保留原目錄，以服務帳號配置新的私有附件目錄，再從 Redmine 重新下載需要的附件。僅存在本機的內容應由原管理者另行備份。
+
 服務安裝於目前使用者的 `%LOCALAPPDATA%\redmine-mcp\service`。Node.js worker 退出後，共用端點會在兩秒後重啟 worker。復原期間端點回傳 HTTP 503。既有自動化可繼續使用 `-UseNode`。`-Restart` 會重啟已安裝的引擎；從 Python 升級時請執行不加參數的安裝命令。
 
 當 agent 發現 MCP 的 `ECONNREFUSED`、重連失敗或啟動逾時時，使用 `redmine-doctor` skill 執行診斷。Windows 可以從已安裝 plugin 直接執行：

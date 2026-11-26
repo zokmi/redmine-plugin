@@ -19,5 +19,7 @@ const { verifyPrivateHandle } = await import('../dist/storage/windows-acl.js');
 verifyPrivateHandle('handle', true);
 actualOwner = 'S-1-5-21-1-2-3-1001';
 assert.throws(() => verifyPrivateHandle('handle', true), /Unsafe owner or DACL/);
+actualOwner = 'S-1-5-32-544';
+assert.throws(() => verifyPrivateHandle('handle', true), /owned by the Windows Administrators group/);
 actualOwner = sid; untrusted = true;
 assert.throws(() => verifyPrivateHandle('handle', true), /Unsafe DACL principal or ACE/);
