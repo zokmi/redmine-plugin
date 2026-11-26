@@ -4,7 +4,7 @@ import { readdir } from 'node:fs/promises';
 import path from 'node:path/posix';
 import { Writable } from 'node:stream';
 import { fingerprint, signature, verifyArchive, writeAll, writeArchive } from './posix-archive.js';
-import { linkAt, mkdirAt, openAt, openDirectory, renameAt, tryFlock, unlinkAt } from './posix-handles.js';
+import { mkdirAt, openAt, openDirectory, renameAt, renameNewAt, tryFlock, unlinkAt } from './posix-handles.js';
 import { parseItemRecord, type ItemRecord } from './record.js';
 import { siteStorageKey } from './site-key.js';
 import type { AttachmentStore, StagedDownload } from './store.js';
@@ -34,25 +34,27 @@ async function withHandles<T>(run: (h: Handles) => T | Promise<T>): Promise<T> {
   try { return await run(handles); } finally { handles.close(); }
 }
 
-function checked(fd: number, directory: boolean): number {
+function checked(fd: number, directory: boolean, uploadSource = false): number {
   const s = fstatSync(fd);
-  if (s.uid !== uid() || (s.mode & 0o077) !== 0 || (directory ? !s.isDirectory() : !s.isFile() || s.nlink !== 1)) {
+  // The caller explicitly selected this upload root. Its descendants may be readable
+  // by others (e.g. 0644), while group/world writes and hard links remain disallowed.
+  const forbiddenMode = uploadSource ? 0o022 : 0o077;
+  if (s.uid !== uid() || (s.mode & forbiddenMode) !== 0 || (directory ? !s.isDirectory() : !s.isFile() || s.nlink !== 1)) {
     throw new Error('Attachment storage requires private, user-owned directories and regular files');
   }
   return fd;
 }
 
-function directory(h: Handles, parent: number, name: string, create = false): number {
+function directory(h: Handles, parent: number, name: string, create = false, uploadSource = false): number {
   let fd;
   try { fd = openAt(parent, name, F.O_RDONLY | F.O_DIRECTORY); }
   catch (e) {
     if (!create || code(e) !== 'ENOENT') throw e;
     try { mkdirAt(parent, name); } catch (mkdirError) { if (code(mkdirError) !== 'EEXIST') throw mkdirError; }
+    fsyncSync(parent);
     fd = openAt(parent, name, F.O_RDONLY | F.O_DIRECTORY);
   }
-  const child = checked(h.keep(fd), true);
-  if (create) fsyncSync(parent);
-  return child;
+  return checked(h.keep(fd), true, uploadSource);
 }
 
 function file(h: Handles, parent: number, name: string, flags = F.O_RDONLY): number {
@@ -81,9 +83,9 @@ function removeOwned(parent: number, name: string, fd: number) {
 function publishNew(parent: number, temporary: string, name: string, fd: number) {
   fsyncSync(fd);
   assertNamed(parent, temporary, fd);
-  linkAt(parent, temporary, parent, name);
+  renameNewAt(parent, temporary, parent, name);
   assertNamed(parent, name, fd);
-  removeOwned(parent, temporary, fd);
+  fsyncSync(parent);
 }
 
 function lock(h: Handles, parent: number, name: string): boolean {
@@ -265,6 +267,9 @@ AttachmentStore & { sweep(now?: Date, signal?: AbortSignal): Promise<void> } {
       try {
         const now = timestamp(clock());
         const record = { ...s.record, size: s.size, sha256: s.hash.digest('hex'), created_at: now, last_used_at: now };
+        // POSIX file locks are advisory. Confirm the staged bytes before adopting the file.
+        const actual = await fingerprint(s.fd);
+        if (actual.size !== record.size || actual.sha256 !== record.sha256) throw new Error('Staged attachment changed');
         publishNew(s.item, '.download.part', record.filename, s.fd);
         writeRecord(s.records, record);
         s.published = path.join(rootPath, record.site_key, 'active', record.item_id, record.filename);
@@ -298,9 +303,10 @@ AttachmentStore & { sweep(now?: Date, signal?: AbortSignal): Promise<void> } {
         if (target === rootPath || !uploadRoot || !path.isAbsolute(uploadRoot)) throw new Error('Source outside upload root');
         const parts = below(uploadRoot, target);
         if (!parts) throw new Error('Source outside upload root');
-        let parent = checked(h.keep(openDirectory(uploadRoot)), true);
-        for (const component of parts.slice(0, -1)) parent = directory(h, parent, component);
-        return bounded(file(h, parent, parts.at(-1)!), max);
+        let parent = checked(h.keep(openDirectory(uploadRoot)), true, true);
+        for (const component of parts.slice(0, -1)) parent = directory(h, parent, component, false, true);
+        const fd = checked(h.keep(openAt(parent, parts.at(-1)!, F.O_RDONLY)), false, true);
+        return bounded(fd, max);
       });
     },
     async sweep(now = clock(), signal) {

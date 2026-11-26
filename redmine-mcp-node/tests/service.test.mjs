@@ -131,12 +131,12 @@ test('stdio and HTTP download into the existing attachment root and reuse each o
   }
   async function download(c, id) {
     const entry = await call(c, 'download_attachment', {attachment_id: id});
-    const parts = dirname(entry.path);
-    assert.equal(dirname(parts), join(root, siteKey, 'active'));
-    assert.match(basename(parts), /^[a-f0-9]{32}$/);
-    assert.equal(basename(entry.path), '檔案' + id + '.bin');
+    const itemDir = dirname(entry.path);
+    assert.equal(dirname(itemDir), join(root, siteKey, 'active'));
+    assert.match(basename(itemDir), /^[a-f0-9]{32}$/);
+    assert.equal(basename(entry.path), id + '_檔案' + id + '.bin');
     assert.deepEqual(await readFile(entry.path), bodies[id - 1]);
-    const record = JSON.parse(await readFile(join(root, siteKey, 'records', basename(parts) + '.json')));
+    const record = JSON.parse(await readFile(join(root, siteKey, 'records', basename(itemDir) + '.json')));
     assert.equal(record.state, 'active');
     assert.equal(record.sha256, createHash('sha256').update(bodies[id - 1]).digest('hex'));
     return entry.path;

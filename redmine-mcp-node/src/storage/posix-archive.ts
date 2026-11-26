@@ -82,11 +82,15 @@ export async function verifyArchive(fd: number, record: ItemRecord): Promise<str
   } finally { zip.close(); }
 }
 
-export async function writeArchive(fd: number, source: number, record: ItemRecord): Promise<void> {
+export async function writeArchive(source: number, fd: number, record: ItemRecord): Promise<void> {
   const writer = new ZipWriter();
-  writer.addReadStream(range(source, 0, record.size), record.filename, { size: record.size, forceZip64Format: true });
+  const output = writer.outputStream as Readable;
+  const input = range(source, 0, record.size);
+  input.on('error', error => output.destroy(error));
+  writer.on('error', error => output.destroy(error));
+  writer.addReadStream(input, record.filename, { size: record.size, forceZip64Format: true });
   writer.end();
-  await pipeline(writer.outputStream, new Writable({
+  await pipeline(output, new Writable({
     write(chunk, _encoding, done) {
       try { writeAll(fd, chunk); done(); } catch (error) { done(error as Error); }
     },
