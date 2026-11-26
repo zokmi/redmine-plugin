@@ -5,12 +5,11 @@ import path from 'node:path/posix';
 import { Writable } from 'node:stream';
 import { fingerprint, signature, verifyArchive, writeAll, writeArchive } from './posix-archive.js';
 import { assertPrivateAcl, mkdirAt, openAt, openDirectory, renameAt, renameNewAt, tryFlock, unlinkAt } from './posix-handles.js';
-import { parseItemRecord, type ItemRecord } from './record.js';
+import { isSweepDue, parseItemRecord, type ItemRecord } from './record.js';
 import { siteStorageKey } from './site-key.js';
 import type { AttachmentStore, StagedDownload } from './store.js';
 
 const idPattern = /^[a-f0-9]{32}$/, sitePattern = /^[a-f0-9]{64}$/;
-const day = 86_400_000;
 const uid = () => process.getuid!();
 const timestamp = (date: Date) => date.toISOString().replace('Z', '+00:00');
 const newId = () => randomUUID().replaceAll('-', '');
@@ -148,17 +147,6 @@ function below(root: string, target: string): string[] | undefined {
   return rel.split('/');
 }
 
-// Python may record microseconds. Round up before comparing a millisecond clock.
-function time(value: string) {
-  const sub = /\.(\d+)\+00:00$/.exec(value)?.[1] ?? '';
-  return Date.parse(value) + (/[1-9]/.test(sub.slice(3)) ? 1 : 0);
-}
-function due(r: ItemRecord, now: number): boolean {
-  if ([r.created_at, r.last_used_at, r.archived_at ?? r.created_at].some(t => time(t) > now)) return false;
-  if (r.state === 'active') return now - time(r.last_used_at) >= 7 * day;
-  return r.state === 'archive_published' || now - time(r.archived_at!) >= 30 * day;
-}
-
 interface Stage extends StagedDownload {
   handles: Handles; item: number; records: number; fd: number;
   record: ItemRecord; size: number; hash: ReturnType<typeof createHash>; done: boolean; published?: string;
@@ -167,11 +155,11 @@ interface Stage extends StagedDownload {
 async function sweepItem(site: number, records: number, locks: number, key: string, id: string, now: Date) {
   const name = id + '.json', zipName = id + '.zip', currentTime = now.getTime();
   const candidate = await withHandles(h => readRecord(file(h, records, name), key, id));
-  if (!due(candidate, currentTime)) return;
+  if (!isSweepDue(candidate, currentTime)) return;
   await withHandles(async h => {
     if (!lock(h, locks, id + '.lock')) return;
     let metadata = file(h, records, name), record = readRecord(metadata, key, id);
-    if (!due(record, currentTime)) return;
+    if (!isSweepDue(record, currentTime)) return;
     const archives = directory(h, site, 'archives', record.state === 'active');
     let zip = optionalFile(h, archives, zipName);
     if (record.state !== 'archived') {
@@ -215,7 +203,7 @@ async function sweepItem(site: number, records: number, locks: number, key: stri
       fsyncSync(item);
       const archived: ItemRecord = { ...record, state: 'archived' };
       writeRecord(records, archived, { fd: metadata, record });
-      if (!due(archived, currentTime)) return;
+      if (!isSweepDue(archived, currentTime)) return;
       metadata = file(h, records, name);
       record = archived;
     }

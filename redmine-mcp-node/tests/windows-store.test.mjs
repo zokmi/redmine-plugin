@@ -225,6 +225,11 @@ test('sweep respects locks and the seven-day idle threshold', {skip:process.plat
   } finally { await rm(base,{recursive:true,force:true}); }
 });
 
+test('sweep filters fresh records before taking their locks and rechecks a refreshed candidate', {skip: process.platform !== 'win32'}, async () => {
+  const { execFileSync } = await import('node:child_process');
+  execFileSync(process.execPath, ['--experimental-test-module-mocks', 'test-support/sweep-candidates-fixture.mjs']);
+});
+
 test('sweep keeps original when a post-rename barrier fails', {skip:process.platform !== 'win32'}, async () => {
   const {spawnSync} = await import('node:child_process');
   for (const mode of ['zip','record','recovery','directory','volume']) {

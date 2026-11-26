@@ -183,14 +183,20 @@ function Listener-Owned([int]$port, [int]$pidValue, $listeners = @(Get-PortListe
     $loopback = @($listeners | Where-Object { $_ -match ('^\s*TCP\s+127\.0\.0\.1:' + $port + '\s') })
     return $loopback.Count -eq 1 -and $loopback[0] -match ('\s' + $pidValue + '\s*$')
 }
-function Test-Authorized([int]$port, [int]$pidValue, [ref]$startupPending, [ref]$upstreamUnavailable) {
-    if (-not (Listener-Owned $port $pidValue)) {
-        if ($startupPending) { $startupPending.Value = $true }
+function Get-ProbeTimeoutSeconds([datetime]$deadline) {
+    return [int][Math]::Min(5.0, [Math]::Floor(($deadline - [datetime]::UtcNow).TotalSeconds))
+}
+function Test-Authorized([int]$port, [int]$pidValue, [ref]$startupPending, [ref]$upstreamUnavailable, [datetime]$deadline = [datetime]::MaxValue) {
+    $listeners = @(Get-PortListeners $port)
+    if (-not (Listener-Owned $port $pidValue $listeners)) {
+        if ($startupPending) { $startupPending.Value = $listeners.Count -eq 0 }
         return $false
     }
     $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"installer-health","version":"1"}}}'
     $uri = [uri]"http://127.0.0.1:$port/mcp"
-    $webOptions = @{ UseBasicParsing=$true; TimeoutSec=5; MaximumRedirection=0 }
+    $timeout = Get-ProbeTimeoutSeconds $deadline
+    if ($timeout -lt 1) { if ($startupPending) { $startupPending.Value = $true }; return $false }
+    $webOptions = @{ UseBasicParsing=$true; TimeoutSec=$timeout; MaximumRedirection=0 }
     if ((Get-Command Invoke-WebRequest).Parameters.ContainsKey('NoProxy')) { $webOptions['NoProxy'] = $true }
     elseif ([Net.WebRequest]::DefaultWebProxy -and -not [Net.WebRequest]::DefaultWebProxy.IsBypassed($uri)) { return $false }
     try {
@@ -198,18 +204,35 @@ function Test-Authorized([int]$port, [int]$pidValue, [ref]$startupPending, [ref]
         if ($response.StatusCode -ne 200) { return $false }
         $session = $response.Headers['mcp-session-id']
         if ($session -and (Listener-Owned $port $pidValue)) {
-            try { $null = Invoke-WebRequest -Uri $uri -Method Delete -Headers @{ Authorization="Bearer $token"; 'mcp-session-id'=[string]$session } @webOptions } catch {}
+            $webOptions.TimeoutSec = Get-ProbeTimeoutSeconds $deadline
+            if ($webOptions.TimeoutSec -ge 1) {
+                try { $null = Invoke-WebRequest -Uri $uri -Method Delete -Headers @{ Authorization="Bearer $token"; 'mcp-session-id'=[string]$session } @webOptions } catch {}
+            }
         }
         $payload = $response.Content
         if ($payload -match '(?m)^data:\s*(.+)\s*$') { $payload = $Matches[1] }
+        if (-not $payload.TrimStart().StartsWith('{')) { return $false }
         $result = $payload | ConvertFrom-Json
-        $valid = $result.id -eq 1 -and $null -ne $result.result.serverInfo -and $null -ne $result.result.protocolVersion -and (Listener-Owned $port $pidValue)
-        return $valid
+        $info = $result.result.serverInfo
+        return $result.jsonrpc -is [string] -and $result.jsonrpc -ceq '2.0' -and
+            ($result.id -is [int] -or $result.id -is [long]) -and $result.id -eq 1 -and $null -eq $result.error -and
+            $result.result.protocolVersion -is [string] -and $result.result.protocolVersion -cmatch '^\d{4}-\d{2}-\d{2}$' -and
+            $result.result.capabilities -is [pscustomobject] -and
+            $info.name -is [string] -and -not [string]::IsNullOrWhiteSpace($info.name) -and
+            $info.version -is [string] -and -not [string]::IsNullOrWhiteSpace($info.version) -and (Listener-Owned $port $pidValue)
     } catch {
-        # Retry only proxy failures that did not return an MCP session.
         if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -in @(502,503)) {
             if ($startupPending) { $startupPending.Value = $true }
             if ($upstreamUnavailable) { $upstreamUnavailable.Value = $true }
+        } elseif ($startupPending -and -not $_.Exception.Response) {
+            # PowerShell 5.1 uses WebException.Timeout; PowerShell 7 uses TaskCanceledException.
+            for ($cause = $_.Exception; $cause; $cause = $cause.InnerException) {
+                if ($cause -is [TimeoutException] -or $cause -is [Threading.Tasks.TaskCanceledException] -or
+                    ($cause -is [Net.WebException] -and $cause.Status -eq [Net.WebExceptionStatus]::Timeout)) {
+                    $startupPending.Value = Listener-Owned $port $pidValue
+                    break
+                }
+            }
         }
         return $false
     }
@@ -312,12 +335,13 @@ function Start-ServiceDeployment($item, [ref]$processRef) {
             try { Restore-ProcessEnvironmentVariable $tokenName $previousToken }
             finally { if ($useDefaultStorage) { Restore-ProcessEnvironmentVariable 'REDMINE_MCP_STORAGE_ROOT' $previousRoot } }
         }
-        $deadline = (Get-Date).AddSeconds(100)
-        while ((Get-Date) -lt $deadline) {
+        $deadline = [datetime]::UtcNow.AddSeconds(100)
+        while ([datetime]::UtcNow -lt $deadline) {
             $p.Refresh(); if ($p.HasExited) { throw "Service exited; see $err" }
             if (Select-String -LiteralPath $out -SimpleMatch "Redmine MCP Node.js listening at http://127.0.0.1:$Port/mcp" -Quiet -ErrorAction SilentlyContinue) {
                 $startupPending = $false
-                if (Test-Authorized $Port $p.Id ([ref]$startupPending)) {
+                if (Test-Authorized $Port $p.Id ([ref]$startupPending) $null $deadline) {
+                    if ([datetime]::UtcNow -ge $deadline) { break }
                     $salt = [Guid]::NewGuid().ToString('N')
                     if ($processRef) { $processRef.Value = $p }
                     return @{ deployment=$item.deployment; engine=$item.engine; pid=$p.Id; startedAt=[string]$p.StartTime.ToUniversalTime().Ticks; image=$node; port=$Port; contextSalt=$salt; contextHash=(Context-Fingerprint $salt $item); envHash=(Context-Fingerprint $salt $item $true); servicePaths=(Get-ServicePaths); contextVersion=$item.contextVersion; environmentSnapshot=(Protect-ServiceEnvironment) }
